@@ -150,10 +150,52 @@ SUPABASE_URL = st.secrets.get("SUPABASE_URL", "") if hasattr(st, "secrets") else
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "") if hasattr(st, "secrets") else ""
 AUTH_AKTIF = bool(SUPABASE_URL and SUPABASE_KEY and create_client is not None)
 
+# Kunci khusus admin (service_role) & kata sandi panel admin - HANYA diisi oleh pemilik
+# aplikasi di Secrets, TIDAK PERNAH dikirim ke browser guru. Dipakai untuk membuat &
+# memantau kode lisensi. Jika kosong, panel admin otomatis nonaktif.
+SUPABASE_SERVICE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY", "") if hasattr(st, "secrets") else ""
+ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "") if hasattr(st, "secrets") else ""
+ADMIN_AKTIF = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY and ADMIN_PASSWORD and create_client is not None)
+
 
 @st.cache_resource
 def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+@st.cache_resource
+def get_supabase_admin():
+    """Client khusus admin, pakai service_role key -> bisa lewati RLS sepenuhnya.
+    Hanya dipanggil dari panel admin yang sudah dilindungi kata sandi."""
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+def generate_kode_unik() -> str:
+    import secrets as _secrets, string as _string
+    abjad = _string.ascii_uppercase + _string.digits
+    blok = lambda n: "".join(_secrets.choice(abjad) for _ in range(n))
+    return f"KKG-{blok(4)}-{blok(4)}"
+
+
+def rpc_reserve_kode(kode: str) -> bool:
+    """Kunci kode secara atomik lewat anon key (aman dari race condition)."""
+    sb = get_supabase()
+    res = sb.rpc("reserve_kode_lisensi", {"p_kode": kode}).execute()
+    return bool(res.data)
+
+
+def rpc_batalkan_kode(kode: str):
+    try:
+        get_supabase().rpc("batalkan_kode_lisensi", {"p_kode": kode}).execute()
+    except Exception:
+        pass
+
+
+def rpc_tautkan_kode(kode: str, user_id: str, email: str):
+    try:
+        get_supabase().rpc("tautkan_kode_lisensi", {"p_kode": kode, "p_user_id": user_id, "p_email": email}).execute()
+    except Exception:
+        pass
 
 
 def sb_daftar(email: str, password: str, nama: str):
@@ -327,28 +369,118 @@ def tampilkan_gerbang_login():
                     st.error(f"❌ Gagal masuk: {e}")
 
     with tab_daftar:
+        st.caption("Butuh **kode aktivasi** dari pemilik aplikasi untuk mendaftar. "
+                    "Satu kode hanya berlaku untuk satu akun guru, berlaku selamanya.")
         with st.form("form_daftar"):
             nama_daftar = st.text_input("Nama Lengkap", key="nama_daftar")
             email_daftar = st.text_input("Email", key="email_daftar")
             pw_daftar = st.text_input("Kata Sandi (minimal 6 karakter)", type="password", key="pw_daftar")
+            kode_daftar = st.text_input("Kode Aktivasi", key="kode_daftar",
+                                          placeholder="contoh: KKG-A1B2-C3D4").strip().upper()
             submit_daftar = st.form_submit_button("📝 Daftar", use_container_width=True)
         if submit_daftar:
-            if not nama_daftar or not email_daftar or not pw_daftar:
-                st.error("⚠️ Mohon lengkapi semua isian.")
+            if not nama_daftar or not email_daftar or not pw_daftar or not kode_daftar:
+                st.error("⚠️ Mohon lengkapi semua isian, termasuk kode aktivasi.")
             elif len(pw_daftar) < 6:
                 st.error("⚠️ Kata sandi minimal 6 karakter.")
             else:
                 try:
-                    res = sb_daftar(email_daftar, pw_daftar, nama_daftar)
-                    if res.user:
-                        st.success("✅ Pendaftaran berhasil! Jika verifikasi email diaktifkan, "
-                                    "silakan cek email Anda terlebih dahulu, lalu masuk lewat tab 'Masuk'.")
-                    else:
-                        st.error("❌ Pendaftaran gagal, coba lagi.")
+                    kode_valid = rpc_reserve_kode(kode_daftar)
                 except Exception as e:
-                    st.error(f"❌ Gagal mendaftar: {e}")
+                    kode_valid = False
+                    st.error(f"❌ Gagal memeriksa kode aktivasi: {e}")
+                if not kode_valid:
+                    st.error("❌ Kode aktivasi tidak ditemukan atau sudah pernah digunakan. "
+                              "Hubungi pemilik aplikasi untuk mendapatkan kode.")
+                else:
+                    try:
+                        res = sb_daftar(email_daftar, pw_daftar, nama_daftar)
+                        if res.user:
+                            rpc_tautkan_kode(kode_daftar, res.user.id, email_daftar)
+                            st.success("✅ Pendaftaran berhasil! Jika verifikasi email diaktifkan, "
+                                        "silakan cek email Anda terlebih dahulu, lalu masuk lewat tab 'Masuk'.")
+                        else:
+                            rpc_batalkan_kode(kode_daftar)
+                            st.error("❌ Pendaftaran gagal, coba lagi.")
+                    except Exception as e:
+                        rpc_batalkan_kode(kode_daftar)
+                        st.error(f"❌ Gagal mendaftar: {e}")
     st.stop()
 
+
+def tampilkan_panel_admin():
+    """Panel khusus pemilik aplikasi: generate & pantau kode lisensi.
+    Diakses lewat URL ...streamlit.app/?admin=1 - tidak muncul di navigasi guru."""
+    st.title("🛡️ Panel Admin — Kode Lisensi")
+    if not ADMIN_AKTIF:
+        st.error("Panel admin belum aktif. Lengkapi `SUPABASE_SERVICE_KEY` dan `ADMIN_PASSWORD` "
+                 "di Secrets terlebih dahulu (lihat README_DEPLOY.md).")
+        st.stop()
+
+    if not st.session_state.get("admin_ok"):
+        with st.form("form_admin_login"):
+            pw = st.text_input("Kata Sandi Admin", type="password")
+            ok = st.form_submit_button("Masuk sebagai Admin")
+        if ok:
+            if pw == ADMIN_PASSWORD:
+                st.session_state.admin_ok = True
+                st.rerun()
+            else:
+                st.error("❌ Kata sandi salah.")
+        st.stop()
+
+    sb_admin = get_supabase_admin()
+
+    st.markdown("### ➕ Buat Kode Lisensi Baru")
+    with st.form("form_generate_kode"):
+        jumlah = st.number_input("Jumlah kode dibuat sekaligus", 1, 100, 1)
+        catatan = st.text_input("Catatan (misal: nama sekolah/pembeli)", "")
+        buat = st.form_submit_button("🎟️ Generate Kode")
+    if buat:
+        kode_baru = []
+        for _ in range(int(jumlah)):
+            k = generate_kode_unik()
+            try:
+                sb_admin.table("kode_lisensi").insert({"kode": k, "catatan": catatan}).execute()
+                kode_baru.append(k)
+            except Exception as e:
+                st.error(f"❌ Gagal menyimpan kode {k}: {e}")
+        if kode_baru:
+            st.success(f"✅ {len(kode_baru)} kode berhasil dibuat.")
+            st.code("\n".join(kode_baru), language=None)
+
+    st.divider()
+    st.markdown("### 📋 Daftar Kode Lisensi")
+    filter_status = st.selectbox("Filter status", ["Semua", "belum_terpakai", "terpakai"])
+    try:
+        q = sb_admin.table("kode_lisensi").select("*").order("dibuat_tanggal", desc=True)
+        if filter_status != "Semua":
+            q = q.eq("status", filter_status)
+        data = q.execute().data or []
+    except Exception as e:
+        st.error(f"❌ Gagal memuat daftar kode: {e}")
+        data = []
+
+    if data:
+        df = pd.DataFrame(data)[["kode", "status", "dipakai_oleh_email", "catatan",
+                                  "dibuat_tanggal", "digunakan_tanggal"]]
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        c1, c2 = st.columns(2)
+        c1.metric("Total kode", len(data))
+        c2.metric("Sudah terpakai", sum(1 for d in data if d["status"] == "terpakai"))
+        st.download_button("⬇️ Unduh sebagai CSV", df.to_csv(index=False).encode("utf-8"),
+                            "kode_lisensi.csv", "text/csv")
+    else:
+        st.info("Belum ada kode dibuat.")
+
+    if st.button("🚪 Keluar dari Panel Admin"):
+        st.session_state.admin_ok = False
+        st.rerun()
+    st.stop()
+
+
+if "admin" in st.query_params:
+    tampilkan_panel_admin()
 
 if AUTH_AKTIF and st.session_state.user is None:
     tampilkan_gerbang_login()
