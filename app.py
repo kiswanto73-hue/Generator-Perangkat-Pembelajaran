@@ -1,6 +1,7 @@
 import streamlit as st
 from groq import Groq
 import re
+import requests
 import pandas as pd
 from datetime import datetime, date, timedelta
 from io import BytesIO
@@ -196,6 +197,42 @@ def rpc_tautkan_kode(kode: str, user_id: str, email: str):
         get_supabase().rpc("tautkan_kode_lisensi", {"p_kode": kode, "p_user_id": user_id, "p_email": email}).execute()
     except Exception:
         pass
+
+
+# Notifikasi WhatsApp otomatis ke admin saat ada pendaftaran guru baru (via Fonnte).
+# Isi TOKEN & NOMOR di Secrets (bukan di kode), agar tidak ikut ter-upload ke GitHub publik.
+TOKEN_FONNTE = st.secrets.get("TOKEN_FONNTE", "") if hasattr(st, "secrets") else ""
+NOMOR_WA_ADMIN = st.secrets.get("6282177723494", "") if hasattr(st, "secrets") else ""
+WA_NOTIF_AKTIF = bool(TOKEN_FONNTE and NOMOR_WA_ADMIN)
+
+
+def kirim_wa_fonnte(nomor: str, pesan: str, token: str) -> bool:
+    """Kirim pesan WA lewat Fonnte. Dibungkus try/except agar kegagalan kirim WA
+    (kuota habis, token salah, dll) TIDAK sampai menggagalkan pendaftaran guru."""
+    try:
+        resp = requests.post(
+            "https://api.fonnte.com/send",
+            headers={"Authorization": token},
+            data={"target": nomor, "message": pesan},
+            timeout=10,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def notifikasi_wa_pendaftaran_baru(nama: str, email: str, kode: str):
+    if not WA_NOTIF_AKTIF:
+        return
+    pesan_admin = (
+        "*PENDAFTARAN AKUN BARU!*\n"
+        "Ada guru yang baru saja mendaftar di aplikasi:\n"
+        f"👤 *Nama:* {nama}\n"
+        f"📧 *Email:* {email}\n"
+        f"🔑 *Kode Aktivasi yang Digunakan:* {kode}\n"
+        "Silakan catat data pendaftar ini."
+    )
+    kirim_wa_fonnte(NOMOR_WA_ADMIN, pesan_admin, TOKEN_FONNTE)
 
 
 def sb_daftar(email: str, password: str, nama: str):
@@ -397,6 +434,7 @@ def tampilkan_gerbang_login():
                         res = sb_daftar(email_daftar, pw_daftar, nama_daftar)
                         if res.user:
                             rpc_tautkan_kode(kode_daftar, res.user.id, email_daftar)
+                            notifikasi_wa_pendaftaran_baru(nama_daftar, email_daftar, kode_daftar)
                             st.success("✅ Pendaftaran berhasil! Jika verifikasi email diaktifkan, "
                                         "silakan cek email Anda terlebih dahulu, lalu masuk lewat tab 'Masuk'.")
                         else:
