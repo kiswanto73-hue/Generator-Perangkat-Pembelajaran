@@ -705,15 +705,36 @@ def baca_tabel_upload(uploaded_file):
 # ============================================================
 # FUNGSI PEMANGGILAN GROQ
 # ============================================================
-def call_groq(api_key: str, prompt: str) -> str:
+def call_groq(api_key: str, prompt: str, max_tokens: int = 6000) -> str:
+    """Panggil Groq. Kalau kena limit token-per-menit (umum di akun gratis, sekarang
+    dibatasi ketat ~8.000 TPM untuk hampir semua model), otomatis coba lagi dengan
+    permintaan token keluaran yang lebih kecil, sampai 3x percobaan."""
     client = Groq(api_key=api_key)
-    completion = client.chat.completions.create(
-        model=MODEL_GROQ,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.6,
-        max_completion_tokens=8192,
+    coba_max = max_tokens
+    error_terakhir = None
+    for percobaan in range(3):
+        try:
+            completion = client.chat.completions.create(
+                model=MODEL_GROQ,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_completion_tokens=coba_max,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            error_terakhir = e
+            pesan = str(e)
+            if "rate_limit_exceeded" in pesan or "tokens per minute" in pesan or "Request too large" in pesan:
+                coba_max = max(1500, coba_max // 2)
+                continue
+            raise
+    raise RuntimeError(
+        "Permintaan ke Groq berulang kali ditolak karena melebihi batas token per menit "
+        "(akun API Key gratis Groq sekarang dibatasi ketat, sekitar 8.000 token/menit). "
+        "Coba: (1) tunggu 1 menit lalu ulangi, (2) persingkat isian/materi yang dimasukkan, "
+        "atau (3) upgrade API Key ke Groq Dev Tier di console.groq.com/settings/billing "
+        f"(biayanya sangat murah). Detail teknis: {error_terakhir}"
     )
-    return completion.choices[0].message.content
 
 
 # ============================================================
