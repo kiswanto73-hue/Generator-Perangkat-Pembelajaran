@@ -37,7 +37,7 @@ except Exception:
 # ============================================================
 st.set_page_config(page_title="Generator Perangkat Ajar KKG", layout="wide", page_icon="📚")
 
-MODEL_GROQ = "llama-3.3-70b-versatile"
+MODEL_GROQ = "openai/gpt-oss-120b"
 
 COLOR_PRIMARY = colors.HexColor("#1E4D8C")
 COLOR_ACCENT = colors.HexColor("#F2A900")
@@ -203,8 +203,8 @@ def rpc_tautkan_kode(kode: str, user_id: str, email: str):
 
 # Notifikasi WhatsApp otomatis ke admin saat ada pendaftaran guru baru (via Fonnte).
 # Isi TOKEN & NOMOR di Secrets (bukan di kode), agar tidak ikut ter-upload ke GitHub publik.
-TOKEN_FONNTE = st.secrets.get("FBanERHupbLbpdDjpWGN", "") if hasattr(st, "secrets") else ""
-NOMOR_WA_ADMIN = st.secrets.get("6282171779764", "") if hasattr(st, "secrets") else ""
+TOKEN_FONNTE = st.secrets.get("TOKEN_FONNTE", "") if hasattr(st, "secrets") else ""
+NOMOR_WA_ADMIN = st.secrets.get("NOMOR_WA_ADMIN", "") if hasattr(st, "secrets") else ""
 WA_NOTIF_AKTIF = bool(TOKEN_FONNTE and NOMOR_WA_ADMIN)
 
 
@@ -2151,18 +2151,35 @@ with sub_scan:
         st.markdown("### 2️⃣ Kamera HP")
         st.caption("Izinkan akses kamera saat diminta browser. Arahkan kamera ke barcode di kartu.")
         html_scanner = """
-        <div id="reader" style="width:100%;max-width:420px;"></div>
-        <div id="hasil_scan" style="margin-top:8px;font-family:sans-serif;font-size:14px;"></div>
+        <style>
+          #reader_wrap { font-family: sans-serif; }
+          #reader { width:100%; max-width:420px; min-height:280px; background:#000; }
+          #reader video { width:100% !important; height:auto !important; display:block !important; }
+          #reader img { display:none !important; }
+          #btn_mulai_kamera {
+            background:#1E4D8C; color:#fff; border:none; padding:10px 16px;
+            border-radius:6px; font-size:14px; cursor:pointer; margin-bottom:10px;
+          }
+          #hasil_scan { margin-top:8px; font-size:14px; }
+        </style>
+        <div id="reader_wrap">
+          <button id="btn_mulai_kamera">▶️ Mulai Kamera</button>
+          <div id="reader"></div>
+          <div id="hasil_scan"></div>
+        </div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
         <script>
         function mulaiScanner() {
             const el = document.getElementById("hasil_scan");
+            const btn = document.getElementById("btn_mulai_kamera");
+            btn.disabled = true;
+            btn.innerText = "🔄 Membuka kamera...";
             const scanner = new Html5Qrcode("reader");
             const config = { fps: 10, qrbox: { width: 250, height: 120 } };
             scanner.start(
                 { facingMode: "environment" }, config,
                 (decodedText) => {
-                    el.innerText = "Terbaca: " + decodedText;
+                    el.innerText = "✅ Terbaca: " + decodedText;
                     scanner.stop().then(() => {
                         const url = new URL(window.parent.location.href);
                         url.searchParams.set("barcode_scan", decodedText);
@@ -2171,14 +2188,21 @@ with sub_scan:
                     });
                 },
                 () => {}
-            ).catch((err) => { el.innerText = "Kamera tidak bisa dibuka: " + err; });
+            ).then(() => {
+                btn.style.display = "none";
+            }).catch((err) => {
+                el.innerText = "❌ Kamera tidak bisa dibuka: " + err;
+                btn.disabled = false;
+                btn.innerText = "▶️ Coba Lagi";
+            });
         }
-        mulaiScanner();
+        document.getElementById("btn_mulai_kamera").addEventListener("click", mulaiScanner);
         </script>
         """
-        st.components.v1.html(html_scanner, height=380)
-        st.caption("Catatan: kalau kamera tidak muncul/diblokir browser, pakai scanner fisik di atas "
-                   "sebagai cadangan.")
+        st.components.v1.html(html_scanner, height=460)
+        st.caption("Tekan tombol **'Mulai Kamera'** dulu (bukan otomatis) — ini wajib di kebanyakan "
+                   "browser HP agar video kamera benar-benar tampil, bukan cuma aktif di belakang layar. "
+                   "Kalau tetap tidak muncul, pakai scanner fisik di atas sebagai cadangan.")
 
         if "barcode_scan" in st.query_params:
             kode_dari_kamera = st.query_params.get("barcode_scan")
