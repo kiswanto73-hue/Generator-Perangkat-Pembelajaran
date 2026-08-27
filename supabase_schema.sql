@@ -117,3 +117,30 @@ $$;
 grant execute on function reserve_kode_lisensi(text) to anon, authenticated;
 grant execute on function batalkan_kode_lisensi(text) to anon, authenticated;
 grant execute on function tautkan_kode_lisensi(text, uuid, text) to anon, authenticated;
+
+-- ============================================================
+-- TAMBAHAN: ABSENSI BARCODE (data ringkas, tidak menyimpan foto -> hemat storage)
+-- Jalankan bagian ini di SQL Editor SETELAH skema-skema di atas.
+-- ============================================================
+
+create table if not exists absensi_barcode (
+    id bigint generated always as identity primary key,
+    user_id uuid references auth.users(id) on delete cascade not null,
+    nisn text not null,
+    nama text,
+    kelas text,
+    tanggal date not null default current_date,
+    waktu timestamptz default now(),
+    status text not null default 'Hadir',  -- Hadir | Sakit | Izin | Alpa
+    unique (user_id, nisn, tanggal)
+);
+
+alter table absensi_barcode enable row level security;
+
+create policy "guru hanya akses absensi barcode miliknya sendiri"
+    on absensi_barcode for all
+    using (auth.uid() = user_id)
+    with check (auth.uid() = user_id);
+
+create index if not exists idx_absensi_barcode_user_tanggal
+    on absensi_barcode (user_id, tanggal);
