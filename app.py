@@ -19,8 +19,7 @@ from docx import Document
 from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
-import barcode
-from barcode.writer import ImageWriter
+import qrcode
 
 try:
     from pypdf import PdfReader
@@ -376,17 +375,15 @@ def db_ambil_absensi_rentang(user_id: str, tgl_awal: str, tgl_akhir: str):
         return []
 
 
-def buat_gambar_barcode_nisn(nisn: str) -> BytesIO:
-    """Hasilkan gambar barcode Code128 dari NISN, dalam memori (tidak disimpan ke disk/DB)."""
+def buat_gambar_qr_nisn(nisn: str) -> BytesIO:
+    """Hasilkan gambar QR Code dari NISN, dalam memori (tidak disimpan ke disk/DB)."""
     buf = BytesIO()
-    Code128 = barcode.get_barcode_class("code128")
-    writer = ImageWriter()
-    writer.dpi = 300
-    kelas_barcode = Code128(nisn, writer=writer)
-    kelas_barcode.write(buf, options={
-        "write_text": False, "module_height": 9.0, "quiet_zone": 2.0,
-        "module_width": 0.28,
-    })
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M,
+                        box_size=10, border=2)
+    qr.add_data(nisn)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    img.save(buf, format="PNG")
     buf.seek(0)
     return buf
 
@@ -448,7 +445,10 @@ def tampilkan_gerbang_login():
                 try:
                     res = sb_masuk(email_masuk, pw_masuk)
                     if res.user:
-                        st.session_state.user = {"id": res.user.id, "email": res.user.email}
+                        st.session_state.user = {
+                            "id": res.user.id, "email": res.user.email,
+                            "access_token": res.session.access_token if res.session else "",
+                        }
                         st.success("✅ Berhasil masuk!")
                         st.rerun()
                     else:
@@ -1850,7 +1850,7 @@ with tab_jurnal:
 # ============================================================
 with tab_absen:
     sub_data, sub_kartu, sub_scan, sub_rekap = st.tabs(
-        ["📋 Data Siswa & Lembar Absen", "🖨️ Cetak Kartu Barcode", "📷 Scan Absen", "📊 Rekap Bulanan"]
+        ["📋 Data Siswa & Lembar Absen", "🖨️ Cetak Kartu QR", "📷 Scan Absen", "📊 Rekap Bulanan"]
     )
 
 with sub_data:
@@ -2023,7 +2023,7 @@ with sub_data:
         st.info("Belum ada data siswa. Tambahkan lewat formulir atau impor daftar tempel di atas.")
 
 with sub_kartu:
-    st.subheader("🖨️ Cetak Kartu Barcode Absen")
+    st.subheader("🖨️ Cetak Kartu QR Absen")
     st.caption("Kartu berisi Nama, Kelas, NISN, barcode, dan kotak kosong untuk foto yang "
                "ditempel manual — seperti kartu pelajar biasa.")
 
@@ -2032,7 +2032,7 @@ with sub_kartu:
 
     if siswa_tanpa_nisn:
         st.warning(f"⚠️ {len(siswa_tanpa_nisn)} siswa belum punya NISN dan tidak akan tercetak "
-                   f"kartunya (barcode wajib pakai NISN). Lengkapi dulu di tab 'Data Siswa & Lembar Absen'.")
+                   f"kartunya (QR wajib pakai NISN). Lengkapi dulu di tab 'Data Siswa & Lembar Absen'.")
 
     if not siswa_ada_nisn:
         st.info("Belum ada siswa dengan NISN terisi.")
@@ -2044,7 +2044,7 @@ with sub_kartu:
                                   default=default_pilih, key="kartu_dipilih")
         siswa_terpilih = [s for s, label in zip(siswa_ada_nisn, nama_opsi) if label in dipilih]
 
-        if st.button("🖨️ Buat PDF Kartu Barcode", key="btn_buat_kartu", use_container_width=True,
+        if st.button("🖨️ Buat PDF Kartu QR", key="btn_buat_kartu", use_container_width=True,
                       disabled=not siswa_terpilih):
             from reportlab.pdfgen import canvas as pdfcanvas
             from reportlab.lib.utils import ImageReader
@@ -2096,39 +2096,42 @@ with sub_kartu:
                 info_w = LEBAR_KARTU - (info_x - x) - 0.25 * cm
                 c.setFillColor(colors.black)
                 c.setFont("Helvetica-Bold", 9)
-                c.drawString(info_x, y + TINGGI_KARTU - 1.15 * cm, (s["Nama"][:26]))
+                c.drawString(info_x, y + TINGGI_KARTU - 1.15 * cm, (s["Nama"][:22]))
                 c.setFont("Helvetica", 7.5)
                 c.drawString(info_x, y + TINGGI_KARTU - 1.55 * cm, f"Kelas: {a_kelas}")
                 c.drawString(info_x, y + TINGGI_KARTU - 1.9 * cm, f"NISN: {s.get('NISN', '')}")
                 c.setFont("Helvetica-Oblique", 6.5)
-                c.drawString(info_x, y + TINGGI_KARTU - 2.25 * cm, st.session_state.sekolah[:30])
+                c.drawString(info_x, y + TINGGI_KARTU - 2.25 * cm, st.session_state.sekolah[:26])
 
-                # Barcode di bawah, selebar kartu
+                # QR code, pojok kanan bawah (persegi, lebih keren & lebih mudah discan dari
+                # berbagai sudut dibanding barcode batang)
                 try:
-                    bc_buf = buat_gambar_barcode_nisn(str(s.get("NISN", "")).strip())
-                    img = ImageReader(bc_buf)
-                    bc_w = LEBAR_KARTU - 0.6 * cm
-                    bc_h = 1.0 * cm
-                    c.drawImage(img, x + 0.3 * cm, y + 0.15 * cm, width=bc_w, height=bc_h,
-                                preserveAspectRatio=False, mask="auto")
-                except Exception as e:
+                    qr_buf = buat_gambar_qr_nisn(str(s.get("NISN", "")).strip())
+                    img = ImageReader(qr_buf)
+                    qr_sisi = 2.5 * cm
+                    qr_x = x + LEBAR_KARTU - qr_sisi - 0.3 * cm
+                    qr_y = y + 0.2 * cm
+                    c.drawImage(img, qr_x, qr_y, width=qr_sisi, height=qr_sisi,
+                                preserveAspectRatio=True, mask="auto")
+                except Exception:
                     c.setFont("Helvetica", 6)
-                    c.drawString(x + 0.3 * cm, y + 0.3 * cm, f"(barcode gagal: NISN tidak valid)")
+                    c.drawString(x + 0.3 * cm, y + 0.3 * cm, "(QR gagal: NISN tidak valid)")
 
             c.save()
             buf.seek(0)
-            st.success(f"✨ {len(siswa_terpilih)} kartu barcode berhasil dibuat!")
-            st.download_button("⬇️ Unduh PDF Kartu Barcode", buf.getvalue(),
-                                f"Kartu_Barcode_{a_kelas.replace(' ', '_')}.pdf",
+            st.success(f"✨ {len(siswa_terpilih)} kartu QR berhasil dibuat!")
+            st.download_button("⬇️ Unduh PDF Kartu QR", buf.getvalue(),
+                                f"Kartu_QR_{a_kelas.replace(' ', '_')}.pdf",
                                 "application/pdf", use_container_width=True)
 
 with sub_scan:
-    st.subheader("📷 Scan Absen (Barcode NISN)")
+    st.subheader("📷 Scan Absen (QR Code NISN)")
     if not (AUTH_AKTIF and st.session_state.user):
         st.warning("⚠️ Fitur ini butuh akun (login) karena kehadiran tersimpan per guru di database. "
                    "Silakan masuk/daftar dulu.")
     else:
         user_id = st.session_state.user["id"]
+        access_token = st.session_state.user.get("access_token", "")
         c1, c2 = st.columns(2)
         with c1:
             scan_tanggal = st.date_input("Tanggal Absen", value=date.today(), key="scan_tanggal")
@@ -2151,9 +2154,9 @@ with sub_scan:
             else:
                 st.session_state["_scan_terakhir"] = f"❌ Gagal mencatat: {err}"
 
-        st.markdown("### 1️⃣ Alat Scanner Barcode Fisik (USB/Bluetooth)")
-        st.caption("Sambungkan scanner ke HP/laptop, klik kotak di bawah, lalu tembak barcode di "
-                   "kartu — scanner otomatis 'mengetik' NISN + Enter.")
+        st.markdown("### 1️⃣ Alat Scanner Fisik (USB/Bluetooth)")
+        st.caption("Sambungkan scanner ke HP/laptop, klik kotak di bawah, lalu tembak QR di "
+                   "kartu — scanner otomatis 'mengetik' NISN + Enter, siap langsung untuk kartu berikutnya.")
         if "_scan_counter" not in st.session_state:
             st.session_state["_scan_counter"] = 0
 
@@ -2162,7 +2165,7 @@ with sub_scan:
             _proses_scan(st.session_state.get(key, ""))
             st.session_state["_scan_counter"] += 1
 
-        st.text_input("Arahkan kursor ke sini lalu scan barcode",
+        st.text_input("Arahkan kursor ke sini lalu scan QR",
                        key=f"scan_fisik_{st.session_state['_scan_counter']}",
                        on_change=_on_scan_fisik, placeholder="Menunggu scan...")
         if st.session_state.get("_scan_terakhir"):
@@ -2170,66 +2173,122 @@ with sub_scan:
 
         st.divider()
         st.markdown("### 2️⃣ Kamera HP")
-        st.caption("Izinkan akses kamera saat diminta browser. Arahkan kamera ke barcode di kartu.")
-        html_scanner = """
+        st.caption("Izinkan akses kamera saat diminta browser. Arahkan kamera ke QR code di kartu. "
+                   "Setiap berhasil scan, kehadiran **langsung tersimpan otomatis** dan kamera tetap "
+                   "menyala — tinggal arahkan ke kartu berikutnya, tanpa perlu buka-tutup kamera lagi.")
+
+        import json as _json
+        konfigurasi_js = _json.dumps({
+            "supabaseUrl": SUPABASE_URL,
+            "anonKey": SUPABASE_KEY,
+            "accessToken": access_token,
+            "userId": user_id,
+            "kelas": scan_kelas,
+            "tanggal": tanggal_str,
+            "petaNisn": peta_nisn,
+        })
+
+        html_scanner = f"""
         <style>
-          #reader_wrap { font-family: sans-serif; }
-          #reader { width:100%; max-width:420px; min-height:280px; background:#000; }
-          #reader video { width:100% !important; height:auto !important; display:block !important; }
-          #reader img { display:none !important; }
-          #btn_mulai_kamera {
+          #reader_wrap {{ font-family: sans-serif; }}
+          #reader {{ width:100%; max-width:420px; min-height:280px; background:#000; }}
+          #reader video {{ width:100% !important; height:auto !important; display:block !important; }}
+          #reader img {{ display:none !important; }}
+          #btn_mulai_kamera {{
             background:#1E4D8C; color:#fff; border:none; padding:10px 16px;
             border-radius:6px; font-size:14px; cursor:pointer; margin-bottom:10px;
-          }
-          #hasil_scan { margin-top:8px; font-size:14px; }
+          }}
+          #hasil_scan {{ margin-top:8px; font-size:14px; font-weight:bold; }}
+          #log_scan {{ margin-top:6px; font-size:12.5px; color:#333; max-height:140px; overflow-y:auto; }}
+          #log_scan div {{ padding:2px 0; border-bottom:1px solid #eee; }}
         </style>
         <div id="reader_wrap">
           <button id="btn_mulai_kamera">▶️ Mulai Kamera</button>
           <div id="reader"></div>
           <div id="hasil_scan"></div>
+          <div id="log_scan"></div>
         </div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
         <script>
-        function mulaiScanner() {
+        const CFG = {konfigurasi_js};
+        let terakhirKode = null;
+        let terakhirWaktu = 0;
+        let totalSesi = 0;
+
+        async function simpanKehadiran(nisn) {{
+            const endpoint = CFG.supabaseUrl + "/rest/v1/absensi_barcode?on_conflict=user_id,nisn,tanggal";
+            const nama = CFG.petaNisn[nisn] || ("(NISN " + nisn + " — tidak ada di data siswa)");
+            const payload = {{
+                user_id: CFG.userId, nisn: nisn, nama: nama, kelas: CFG.kelas,
+                tanggal: CFG.tanggal, status: "Hadir"
+            }};
+            try {{
+                const resp = await fetch(endpoint, {{
+                    method: "POST",
+                    headers: {{
+                        "Content-Type": "application/json",
+                        "apikey": CFG.anonKey,
+                        "Authorization": "Bearer " + (CFG.accessToken || CFG.anonKey),
+                        "Prefer": "resolution=merge-duplicates,return=minimal"
+                    }},
+                    body: JSON.stringify(payload)
+                }});
+                return {{ ok: resp.ok, nama: nama, status: resp.status }};
+            }} catch (e) {{
+                return {{ ok: false, nama: nama, status: "jaringan" }};
+            }}
+        }}
+
+        function mulaiScanner() {{
             const el = document.getElementById("hasil_scan");
+            const log = document.getElementById("log_scan");
             const btn = document.getElementById("btn_mulai_kamera");
             btn.disabled = true;
             btn.innerText = "🔄 Membuka kamera...";
             const scanner = new Html5Qrcode("reader");
-            const config = { fps: 10, qrbox: { width: 250, height: 120 } };
+            const config = {{ fps: 10, qrbox: {{ width: 230, height: 230 }} }};
             scanner.start(
-                { facingMode: "environment" }, config,
-                (decodedText) => {
-                    el.innerText = "✅ Terbaca: " + decodedText;
-                    scanner.stop().then(() => {
-                        const url = new URL(window.parent.location.href);
-                        url.searchParams.set("barcode_scan", decodedText);
-                        url.searchParams.set("t", Date.now());
-                        window.parent.location.href = url.toString();
-                    });
-                },
-                () => {}
-            ).then(() => {
+                {{ facingMode: "environment" }}, config,
+                async (decodedText) => {{
+                    const sekarang = Date.now();
+                    if (decodedText === terakhirKode && (sekarang - terakhirWaktu) < 4000) {{
+                        return; // cegah kartu yang sama ke-scan berkali-kali saat masih di depan kamera
+                    }}
+                    terakhirKode = decodedText;
+                    terakhirWaktu = sekarang;
+                    el.innerText = "⏳ Menyimpan " + decodedText + " ...";
+                    const hasil = await simpanKehadiran(decodedText);
+                    totalSesi += 1;
+                    if (hasil.ok) {{
+                        el.innerText = "✅ " + hasil.nama + " tercatat Hadir. Siap kartu berikutnya (total sesi ini: " + totalSesi + ")";
+                    }} else {{
+                        el.innerText = "❌ Gagal menyimpan (" + hasil.status + "). Coba scan ulang.";
+                    }}
+                    const baris = document.createElement("div");
+                    baris.innerText = (hasil.ok ? "✅ " : "❌ ") + hasil.nama + " — " + new Date().toLocaleTimeString();
+                    log.prepend(baris);
+                }},
+                () => {{}}
+            ).then(() => {{
                 btn.style.display = "none";
-            }).catch((err) => {
+            }}).catch((err) => {{
                 el.innerText = "❌ Kamera tidak bisa dibuka: " + err;
                 btn.disabled = false;
                 btn.innerText = "▶️ Coba Lagi";
-            });
-        }
+            }});
+        }}
         document.getElementById("btn_mulai_kamera").addEventListener("click", mulaiScanner);
         </script>
         """
-        st.components.v1.html(html_scanner, height=460)
+        st.components.v1.html(html_scanner, height=560)
         st.caption("Tekan tombol **'Mulai Kamera'** dulu (bukan otomatis) — ini wajib di kebanyakan "
                    "browser HP agar video kamera benar-benar tampil, bukan cuma aktif di belakang layar. "
                    "Kalau tetap tidak muncul, pakai scanner fisik di atas sebagai cadangan.")
-
-        if "barcode_scan" in st.query_params:
-            kode_dari_kamera = st.query_params.get("barcode_scan")
-            _proses_scan(kode_dari_kamera)
-            st.query_params.clear()
+        if st.button("🔄 Refresh Daftar Sudah Tercatat", key="btn_refresh_scan"):
             st.rerun()
+        st.caption("Daftar di bawah ini diambil dari database, jadi tekan tombol refresh di atas "
+                   "kapan pun untuk melihat hasil scan kamera terbaru (kamera menyimpan langsung ke "
+                   "database tanpa perlu memuat ulang halaman).")
 
         st.divider()
         st.markdown("### ✏️ Tandai Manual (Sakit/Izin/Alpa)")
