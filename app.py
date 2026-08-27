@@ -201,7 +201,7 @@ def rpc_tautkan_kode(kode: str, user_id: str, email: str):
 
 # Notifikasi WhatsApp otomatis ke admin saat ada pendaftaran guru baru (via Fonnte).
 # Isi TOKEN & NOMOR di Secrets (bukan di kode), agar tidak ikut ter-upload ke GitHub publik.
-TOKEN_FONNTE = st.secrets.get("eRiRwGfU96GqAyaMXM7Q", "") if hasattr(st, "secrets") else ""
+TOKEN_FONNTE = st.secrets.get("FBanERHupbLbpdDjpWGN", "") if hasattr(st, "secrets") else ""
 NOMOR_WA_ADMIN = st.secrets.get("6282177723494", "") if hasattr(st, "secrets") else ""
 WA_NOTIF_AKTIF = bool(TOKEN_FONNTE and NOMOR_WA_ADMIN)
 
