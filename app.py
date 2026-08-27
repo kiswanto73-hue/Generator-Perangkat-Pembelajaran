@@ -19,6 +19,8 @@ from docx import Document
 from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+import barcode
+from barcode.writer import ImageWriter
 
 try:
     from pypdf import PdfReader
@@ -201,8 +203,8 @@ def rpc_tautkan_kode(kode: str, user_id: str, email: str):
 
 # Notifikasi WhatsApp otomatis ke admin saat ada pendaftaran guru baru (via Fonnte).
 # Isi TOKEN & NOMOR di Secrets (bukan di kode), agar tidak ikut ter-upload ke GitHub publik.
-TOKEN_FONNTE = st.secrets.get("FBanERHupbLbpdDjpWGN", "") if hasattr(st, "secrets") else ""
-NOMOR_WA_ADMIN = st.secrets.get("6282177723494", "") if hasattr(st, "secrets") else ""
+TOKEN_FONNTE = st.secrets.get("TOKEN_FONNTE", "") if hasattr(st, "secrets") else ""
+NOMOR_WA_ADMIN = st.secrets.get("NOMOR_WA_ADMIN", "") if hasattr(st, "secrets") else ""
 WA_NOTIF_AKTIF = bool(TOKEN_FONNTE and NOMOR_WA_ADMIN)
 
 
@@ -338,6 +340,55 @@ def db_kosongkan_siswa(user_id: str):
         get_supabase().table("data_siswa").delete().eq("user_id", user_id).execute()
     except Exception as e:
         st.warning(f"⚠️ Gagal mengosongkan data di database: {e}")
+
+
+def db_catat_absensi_barcode(user_id: str, nisn: str, nama: str, kelas: str,
+                               tanggal_str: str, status: str = "Hadir"):
+    """Catat/perbarui kehadiran satu siswa untuk satu tanggal (upsert berdasarkan
+    kombinasi guru+NISN+tanggal, jadi aman di-scan ulang tanpa duplikat)."""
+    sb = get_supabase()
+    payload = {"user_id": user_id, "nisn": nisn, "nama": nama, "kelas": kelas,
+               "tanggal": tanggal_str, "status": status}
+    try:
+        sb.table("absensi_barcode").upsert(payload, on_conflict="user_id,nisn,tanggal").execute()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def db_ambil_absensi_tanggal(user_id: str, tanggal_str: str):
+    try:
+        res = (get_supabase().table("absensi_barcode").select("*")
+               .eq("user_id", user_id).eq("tanggal", tanggal_str)
+               .order("waktu", desc=True).execute())
+        return res.data or []
+    except Exception:
+        return []
+
+
+def db_ambil_absensi_rentang(user_id: str, tgl_awal: str, tgl_akhir: str):
+    try:
+        res = (get_supabase().table("absensi_barcode").select("*")
+               .eq("user_id", user_id).gte("tanggal", tgl_awal).lte("tanggal", tgl_akhir)
+               .order("tanggal").execute())
+        return res.data or []
+    except Exception:
+        return []
+
+
+def buat_gambar_barcode_nisn(nisn: str) -> BytesIO:
+    """Hasilkan gambar barcode Code128 dari NISN, dalam memori (tidak disimpan ke disk/DB)."""
+    buf = BytesIO()
+    Code128 = barcode.get_barcode_class("code128")
+    writer = ImageWriter()
+    writer.dpi = 300
+    kelas_barcode = Code128(nisn, writer=writer)
+    kelas_barcode.write(buf, options={
+        "write_text": False, "module_height": 9.0, "quiet_zone": 2.0,
+        "module_width": 0.28,
+    })
+    buf.seek(0)
+    return buf
 
 
 def tambah_baris_jurnal(row: dict):
@@ -1777,6 +1828,11 @@ with tab_jurnal:
 # TAB 7 - DATA SISWA & LEMBAR ABSENSI
 # ============================================================
 with tab_absen:
+    sub_data, sub_kartu, sub_scan, sub_rekap = st.tabs(
+        ["📋 Data Siswa & Lembar Absen", "🖨️ Cetak Kartu Barcode", "📷 Scan Absen", "📊 Rekap Bulanan"]
+    )
+
+with sub_data:
     st.subheader("Data Peserta Didik & Lembar Absensi")
     st.caption("Input data siswa satu kali, lalu buat lembar absen siap cetak kapan saja.")
 
@@ -1944,3 +2000,272 @@ with tab_absen:
             download_row(f"Absensi_{a_kelas.replace(' ', '_')}", pdf_absen, docx_absen, "dl_absen")
     else:
         st.info("Belum ada data siswa. Tambahkan lewat formulir atau impor daftar tempel di atas.")
+
+with sub_kartu:
+    st.subheader("🖨️ Cetak Kartu Barcode Absen")
+    st.caption("Kartu berisi Nama, Kelas, NISN, barcode, dan kotak kosong untuk foto yang "
+               "ditempel manual — seperti kartu pelajar biasa.")
+
+    siswa_ada_nisn = [s for s in st.session_state.siswa_rows if str(s.get("NISN", "")).strip()]
+    siswa_tanpa_nisn = [s for s in st.session_state.siswa_rows if not str(s.get("NISN", "")).strip()]
+
+    if siswa_tanpa_nisn:
+        st.warning(f"⚠️ {len(siswa_tanpa_nisn)} siswa belum punya NISN dan tidak akan tercetak "
+                   f"kartunya (barcode wajib pakai NISN). Lengkapi dulu di tab 'Data Siswa & Lembar Absen'.")
+
+    if not siswa_ada_nisn:
+        st.info("Belum ada siswa dengan NISN terisi.")
+    else:
+        pilih_semua = st.checkbox("Pilih semua siswa (yang punya NISN)", value=True, key="kartu_pilih_semua")
+        nama_opsi = [f"{s['Nama']} — {s.get('NISN', '')}" for s in siswa_ada_nisn]
+        default_pilih = nama_opsi if pilih_semua else []
+        dipilih = st.multiselect("Pilih siswa yang kartunya mau dicetak", nama_opsi,
+                                  default=default_pilih, key="kartu_dipilih")
+        siswa_terpilih = [s for s, label in zip(siswa_ada_nisn, nama_opsi) if label in dipilih]
+
+        if st.button("🖨️ Buat PDF Kartu Barcode", key="btn_buat_kartu", use_container_width=True,
+                      disabled=not siswa_terpilih):
+            from reportlab.pdfgen import canvas as pdfcanvas
+            from reportlab.lib.utils import ImageReader
+
+            LEBAR_KARTU, TINGGI_KARTU = 9.0 * cm, 5.6 * cm
+            KOLOM, BARIS = 2, 4
+            MARGIN_X, MARGIN_Y = 1.35 * cm, 1.0 * cm
+            GAP = 0.3 * cm
+
+            buf = BytesIO()
+            c = pdfcanvas.Canvas(buf, pagesize=A4)
+            lebar_hal, tinggi_hal = A4
+
+            for idx, s in enumerate(siswa_terpilih):
+                posisi = idx % (KOLOM * BARIS)
+                if idx > 0 and posisi == 0:
+                    c.showPage()
+                kol, bar = posisi % KOLOM, posisi // KOLOM
+                x = MARGIN_X + kol * (LEBAR_KARTU + GAP)
+                y = tinggi_hal - MARGIN_Y - (bar + 1) * TINGGI_KARTU - bar * GAP
+
+                # Bingkai kartu
+                c.setStrokeColor(COLOR_PRIMARY)
+                c.setLineWidth(1)
+                c.roundRect(x, y, LEBAR_KARTU, TINGGI_KARTU, 4, stroke=1, fill=0)
+
+                # Header
+                c.setFillColor(COLOR_PRIMARY)
+                c.rect(x, y + TINGGI_KARTU - 0.7 * cm, LEBAR_KARTU, 0.7 * cm, stroke=0, fill=1)
+                c.setFillColor(colors.white)
+                c.setFont("Helvetica-Bold", 8)
+                c.drawCentredString(x + LEBAR_KARTU / 2, y + TINGGI_KARTU - 0.48 * cm,
+                                     "KARTU ABSEN SISWA")
+
+                # Kotak foto (kiri)
+                kotak_x, kotak_y = x + 0.3 * cm, y + 0.35 * cm
+                kotak_w, kotak_h = 2.3 * cm, 3.0 * cm
+                c.setDash(2, 2)
+                c.setStrokeColor(colors.grey)
+                c.rect(kotak_x, kotak_y, kotak_w, kotak_h, stroke=1, fill=0)
+                c.setDash()
+                c.setFillColor(colors.grey)
+                c.setFont("Helvetica", 6)
+                c.drawCentredString(kotak_x + kotak_w / 2, kotak_y + kotak_h / 2, "Tempel")
+                c.drawCentredString(kotak_x + kotak_w / 2, kotak_y + kotak_h / 2 - 0.25 * cm, "Foto")
+
+                # Info siswa (kanan foto)
+                info_x = kotak_x + kotak_w + 0.3 * cm
+                info_w = LEBAR_KARTU - (info_x - x) - 0.25 * cm
+                c.setFillColor(colors.black)
+                c.setFont("Helvetica-Bold", 9)
+                c.drawString(info_x, y + TINGGI_KARTU - 1.15 * cm, (s["Nama"][:26]))
+                c.setFont("Helvetica", 7.5)
+                c.drawString(info_x, y + TINGGI_KARTU - 1.55 * cm, f"Kelas: {a_kelas}")
+                c.drawString(info_x, y + TINGGI_KARTU - 1.9 * cm, f"NISN: {s.get('NISN', '')}")
+                c.setFont("Helvetica-Oblique", 6.5)
+                c.drawString(info_x, y + TINGGI_KARTU - 2.25 * cm, st.session_state.sekolah[:30])
+
+                # Barcode di bawah, selebar kartu
+                try:
+                    bc_buf = buat_gambar_barcode_nisn(str(s.get("NISN", "")).strip())
+                    img = ImageReader(bc_buf)
+                    bc_w = LEBAR_KARTU - 0.6 * cm
+                    bc_h = 1.0 * cm
+                    c.drawImage(img, x + 0.3 * cm, y + 0.15 * cm, width=bc_w, height=bc_h,
+                                preserveAspectRatio=False, mask="auto")
+                except Exception as e:
+                    c.setFont("Helvetica", 6)
+                    c.drawString(x + 0.3 * cm, y + 0.3 * cm, f"(barcode gagal: NISN tidak valid)")
+
+            c.save()
+            buf.seek(0)
+            st.success(f"✨ {len(siswa_terpilih)} kartu barcode berhasil dibuat!")
+            st.download_button("⬇️ Unduh PDF Kartu Barcode", buf.getvalue(),
+                                f"Kartu_Barcode_{a_kelas.replace(' ', '_')}.pdf",
+                                "application/pdf", use_container_width=True)
+
+with sub_scan:
+    st.subheader("📷 Scan Absen (Barcode NISN)")
+    if not (AUTH_AKTIF and st.session_state.user):
+        st.warning("⚠️ Fitur ini butuh akun (login) karena kehadiran tersimpan per guru di database. "
+                   "Silakan masuk/daftar dulu.")
+    else:
+        user_id = st.session_state.user["id"]
+        c1, c2 = st.columns(2)
+        with c1:
+            scan_tanggal = st.date_input("Tanggal Absen", value=date.today(), key="scan_tanggal")
+        with c2:
+            scan_kelas = st.selectbox("Kelas", KELAS_OPTIONS, key="scan_kelas")
+        tanggal_str = scan_tanggal.strftime("%Y-%m-%d")
+
+        peta_nisn = {str(s.get("NISN", "")).strip(): s["Nama"]
+                     for s in st.session_state.siswa_rows if str(s.get("NISN", "")).strip()}
+
+        def _proses_scan(nisn_masuk: str):
+            nisn_masuk = nisn_masuk.strip()
+            if not nisn_masuk:
+                return
+            nama_siswa = peta_nisn.get(nisn_masuk, f"(NISN {nisn_masuk} — tidak ada di data siswa)")
+            ok, err = db_catat_absensi_barcode(user_id, nisn_masuk, nama_siswa, scan_kelas,
+                                                 tanggal_str, "Hadir")
+            if ok:
+                st.session_state["_scan_terakhir"] = f"✅ {nama_siswa} tercatat Hadir."
+            else:
+                st.session_state["_scan_terakhir"] = f"❌ Gagal mencatat: {err}"
+
+        st.markdown("### 1️⃣ Alat Scanner Barcode Fisik (USB/Bluetooth)")
+        st.caption("Sambungkan scanner ke HP/laptop, klik kotak di bawah, lalu tembak barcode di "
+                   "kartu — scanner otomatis 'mengetik' NISN + Enter.")
+        if "_scan_counter" not in st.session_state:
+            st.session_state["_scan_counter"] = 0
+
+        def _on_scan_fisik():
+            key = f"scan_fisik_{st.session_state['_scan_counter']}"
+            _proses_scan(st.session_state.get(key, ""))
+            st.session_state["_scan_counter"] += 1
+
+        st.text_input("Arahkan kursor ke sini lalu scan barcode",
+                       key=f"scan_fisik_{st.session_state['_scan_counter']}",
+                       on_change=_on_scan_fisik, placeholder="Menunggu scan...")
+        if st.session_state.get("_scan_terakhir"):
+            st.info(st.session_state["_scan_terakhir"])
+
+        st.divider()
+        st.markdown("### 2️⃣ Kamera HP")
+        st.caption("Izinkan akses kamera saat diminta browser. Arahkan kamera ke barcode di kartu.")
+        html_scanner = """
+        <div id="reader" style="width:100%;max-width:420px;"></div>
+        <div id="hasil_scan" style="margin-top:8px;font-family:sans-serif;font-size:14px;"></div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+        <script>
+        function mulaiScanner() {
+            const el = document.getElementById("hasil_scan");
+            const scanner = new Html5Qrcode("reader");
+            const config = { fps: 10, qrbox: { width: 250, height: 120 } };
+            scanner.start(
+                { facingMode: "environment" }, config,
+                (decodedText) => {
+                    el.innerText = "Terbaca: " + decodedText;
+                    scanner.stop().then(() => {
+                        const url = new URL(window.parent.location.href);
+                        url.searchParams.set("barcode_scan", decodedText);
+                        url.searchParams.set("t", Date.now());
+                        window.parent.location.href = url.toString();
+                    });
+                },
+                () => {}
+            ).catch((err) => { el.innerText = "Kamera tidak bisa dibuka: " + err; });
+        }
+        mulaiScanner();
+        </script>
+        """
+        st.components.v1.html(html_scanner, height=380)
+        st.caption("Catatan: kalau kamera tidak muncul/diblokir browser, pakai scanner fisik di atas "
+                   "sebagai cadangan.")
+
+        if "barcode_scan" in st.query_params:
+            kode_dari_kamera = st.query_params.get("barcode_scan")
+            _proses_scan(kode_dari_kamera)
+            st.query_params.clear()
+            st.rerun()
+
+        st.divider()
+        st.markdown("### ✏️ Tandai Manual (Sakit/Izin/Alpa)")
+        mc1, mc2, mc3 = st.columns([2, 1, 1])
+        with mc1:
+            nama_manual = st.selectbox("Siswa", [s["Nama"] for s in st.session_state.siswa_rows]
+                                        if st.session_state.siswa_rows else ["(belum ada siswa)"],
+                                        key="manual_nama")
+        with mc2:
+            status_manual = st.selectbox("Status", ["Sakit", "Izin", "Alpa", "Hadir"], key="manual_status")
+        with mc3:
+            st.write("")
+            st.write("")
+            if st.button("Catat", key="btn_manual_absen"):
+                siswa_manual = next((s for s in st.session_state.siswa_rows if s["Nama"] == nama_manual), None)
+                if siswa_manual:
+                    nisn_m = str(siswa_manual.get("NISN", "")).strip() or f"NOISN-{siswa_manual.get('id', nama_manual)}"
+                    ok, err = db_catat_absensi_barcode(user_id, nisn_m, nama_manual, scan_kelas,
+                                                         tanggal_str, status_manual)
+                    if ok:
+                        st.success(f"✅ {nama_manual} dicatat {status_manual}.")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Gagal: {err}")
+
+        st.divider()
+        st.markdown(f"### 📋 Sudah Tercatat Hari Ini ({scan_tanggal.strftime('%d-%m-%Y')})")
+        data_hari_ini = db_ambil_absensi_tanggal(user_id, tanggal_str)
+        if data_hari_ini:
+            df_hari_ini = pd.DataFrame(data_hari_ini)[["nama", "nisn", "status", "waktu"]]
+            df_hari_ini.columns = ["Nama", "NISN", "Status", "Waktu"]
+            st.dataframe(df_hari_ini, use_container_width=True, hide_index=True)
+            st.caption(f"Total tercatat: {len(data_hari_ini)} siswa")
+        else:
+            st.info("Belum ada yang tercatat hari ini.")
+
+with sub_rekap:
+    st.subheader("📊 Rekap Absen Bulanan")
+    if not (AUTH_AKTIF and st.session_state.user):
+        st.warning("⚠️ Fitur ini butuh akun (login) karena kehadiran tersimpan per guru di database.")
+    else:
+        user_id = st.session_state.user["id"]
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            bulan_pilihan = st.selectbox("Bulan", list(range(1, 13)),
+                                          index=date.today().month - 1,
+                                          format_func=lambda m: [
+                                              "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+                                              "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+                                          ][m - 1], key="rekap_bulan")
+        with rc2:
+            tahun_pilihan = st.number_input("Tahun", 2020, 2100, date.today().year, key="rekap_tahun")
+
+        tgl_awal = date(tahun_pilihan, bulan_pilihan, 1)
+        tgl_akhir = date(tahun_pilihan + (1 if bulan_pilihan == 12 else 0),
+                          1 if bulan_pilihan == 12 else bulan_pilihan + 1, 1) - timedelta(days=1)
+
+        if st.button("🔍 Tampilkan Rekap", key="btn_rekap"):
+            data_bulan = db_ambil_absensi_rentang(user_id, tgl_awal.strftime("%Y-%m-%d"),
+                                                    tgl_akhir.strftime("%Y-%m-%d"))
+            if not data_bulan:
+                st.info("Belum ada data absensi pada bulan ini.")
+            else:
+                df = pd.DataFrame(data_bulan)
+                hari_efektif = df["tanggal"].nunique()
+                pivot = df.pivot_table(index=["nama", "nisn"], columns="status",
+                                        values="id", aggfunc="count", fill_value=0).reset_index()
+                for kol in ["Hadir", "Sakit", "Izin", "Alpa"]:
+                    if kol not in pivot.columns:
+                        pivot[kol] = 0
+                pivot["Total Tercatat"] = pivot[["Hadir", "Sakit", "Izin", "Alpa"]].sum(axis=1)
+                pivot["% Hadir"] = (pivot["Hadir"] / pivot["Total Tercatat"].replace(0, 1) * 100).round(1)
+                pivot = pivot.rename(columns={"nama": "Nama", "nisn": "NISN"})
+                pivot = pivot[["Nama", "NISN", "Hadir", "Sakit", "Izin", "Alpa", "Total Tercatat", "% Hadir"]]
+
+                st.caption(f"Jumlah hari tercatat dalam bulan ini: **{hari_efektif} hari**")
+                st.dataframe(pivot, use_container_width=True, hide_index=True)
+
+                buf_excel = BytesIO()
+                with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
+                    pivot.to_excel(writer, index=False, sheet_name="Rekap Absen")
+                st.download_button("⬇️ Unduh Rekap (Excel)", buf_excel.getvalue(),
+                                    f"Rekap_Absen_{tahun_pilihan}-{bulan_pilihan:02d}.xlsx",
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
