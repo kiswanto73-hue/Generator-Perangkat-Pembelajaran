@@ -97,6 +97,18 @@ menghadirkan tiga prinsip berikut secara EKSPLISIT (beri label di setiap langkah
 
 Setiap langkah pada bagian Kegiatan Inti WAJIB diberi penanda, contoh:
 "Guru mengajak murid duduk tenang sejenak dan menyebutkan tujuan belajar hari ini. (Mindful)"
+
+ATURAN FORMAT KETAT (WAJIB DIPATUHI):
+Dokumen ini akan dicetak ke PDF/Word, BUKAN ditampilkan sebagai halaman web. Karena itu:
+- JANGAN PERNAH menulis tag HTML apa pun, termasuk <textarea>, <img>, <br>, <div>, <input>,
+  <table>, atau tag lainnya. Tag HTML akan muncul sebagai teks aneh/rusak di dokumen cetak.
+- Untuk kolom isian jawaban, gunakan garis titik-titik biasa, contoh: Jawaban: ______________
+- Untuk kotak kosong isian, gunakan format: [ ................................. ]
+- Untuk ilustrasi/gambar yang perlu ditempel guru, TULISKAN keterangannya dalam kalimat biasa
+  di dalam tanda kurung siku, contoh: [Petunjuk ilustrasi: gambar dua ekor kucing bermain bola].
+  JANGAN PERNAH menyertakan tag <img>, URL gambar, atau tautan gambar apa pun (termasuk dari
+  placeholder.com atau sejenisnya) — gambar sungguhan tidak bisa dihasilkan lewat teks.
+- Gunakan HANYA format Markdown biasa (heading #, bold **, tabel markdown, list -), tanpa HTML.
 """
 
 SUBJECT_OPTIONS = ["PAI & BP", "Bahasa Indonesia", "Matematika", "IPAS", "PJOK",
@@ -234,6 +246,41 @@ def notifikasi_wa_pendaftaran_baru(nama: str, email: str, kode: str):
         "Silakan catat data pendaftar ini."
     )
     kirim_wa_fonnte(NOMOR_WA_ADMIN, pesan_admin, TOKEN_FONNTE)
+
+
+# --- Konfigurasi pembayaran & permintaan kode mandiri lewat poster promosi ---
+DANA_NOMOR = st.secrets.get("DANA_NOMOR", "") if hasattr(st, "secrets") else ""
+DANA_NAMA = st.secrets.get("DANA_NAMA", "") if hasattr(st, "secrets") else ""
+HARGA_KODE = st.secrets.get("HARGA_KODE", "") if hasattr(st, "secrets") else ""
+WA_ADMIN_TAMPIL = st.secrets.get("NOMOR_WA_ADMIN", "") if hasattr(st, "secrets") else ""
+POSTER_AKTIF = bool(DANA_NOMOR and DANA_NAMA and HARGA_KODE and WA_ADMIN_TAMPIL)
+
+
+def buat_dan_kirim_permintaan_kode(nama_pemohon: str, sekolah_pemohon: str, wa_pemohon: str):
+    """Dipanggil dari halaman poster publik (belum login). Generate 1 kode baru & simpan ke
+    database lewat Service Key (aman, server-side), lalu kirim ke WA ADMIN (bukan ke pemohon
+    langsung) supaya Admin bisa verifikasi bukti transfer dulu sebelum meneruskan kodenya."""
+    if not ADMIN_AKTIF:
+        return False, "Sistem otomatis belum aktif (Admin belum atur Secrets)."
+    kode_baru = generate_kode_unik()
+    catatan = f"Permintaan mandiri via poster - {nama_pemohon} ({sekolah_pemohon}) - WA {wa_pemohon}"
+    try:
+        get_supabase_admin().table("kode_lisensi").insert(
+            {"kode": kode_baru, "catatan": catatan}).execute()
+    except Exception as e:
+        return False, f"Gagal menyimpan kode baru: {e}"
+
+    pesan = (
+        "*PERMINTAAN KODE AKTIVASI BARU!*\n"
+        "Ada guru yang mengaku sudah transfer mahar dan minta kode aktivasi:\n"
+        f"👤 *Nama:* {nama_pemohon}\n"
+        f"🏫 *Sekolah:* {sekolah_pemohon}\n"
+        f"📱 *No. WA Pemohon:* {wa_pemohon}\n"
+        f"🔑 *Kode Aktivasi (BARU, siap dipakai):* {kode_baru}\n\n"
+        "⚠️ Cek dulu bukti transfer dari nomor WA di atas sebelum kode ini diteruskan ke yang bersangkutan."
+    )
+    kirim_wa_fonnte(NOMOR_WA_ADMIN, pesan, TOKEN_FONNTE)
+    return True, kode_baru
 
 
 def sb_daftar(email: str, password: str, nama: str):
@@ -431,7 +478,8 @@ def tampilkan_gerbang_login():
     st.title("📚 Generator Perangkat Ajar Kurikulum Merdeka")
     st.caption("Silakan masuk atau daftar akun guru untuk mulai menggunakan aplikasi. "
                "Data jurnal & absen Anda akan tersimpan permanen dan hanya bisa diakses oleh akun Anda sendiri.")
-    tab_masuk, tab_daftar = st.tabs(["🔑 Masuk", "📝 Daftar Akun Baru"])
+    tab_masuk, tab_daftar, tab_beli = st.tabs(
+        ["🔑 Masuk", "📝 Daftar Akun Baru", "🛒 Belum Punya Kode?"])
 
     with tab_masuk:
         with st.form("form_masuk"):
@@ -494,6 +542,64 @@ def tampilkan_gerbang_login():
                     except Exception as e:
                         rpc_batalkan_kode(kode_daftar)
                         st.error(f"❌ Gagal mendaftar: {e}")
+
+    with tab_beli:
+        if not POSTER_AKTIF:
+            st.warning("⚠️ Halaman ini belum diatur oleh Admin (nomor DANA, nama pemilik "
+                       "rekening, harga, dan nomor WA admin belum lengkap di Secrets).")
+        else:
+            wa_link_pesan = (
+                "Halo Admin, saya guru dan ingin mendapatkan kode aktivasi "
+                "Generator Perangkat Ajar KKG. Ini bukti transfer saya:"
+            )
+            wa_link = f"https://wa.me/{WA_ADMIN_TAMPIL}?text={requests.utils.quote(wa_link_pesan)}"
+            st.markdown(f"""
+<div style="background:linear-gradient(135deg,#1E4D8C,#3E7CC7);border-radius:16px;
+            padding:28px 24px;color:white;text-align:center;margin-bottom:18px;">
+  <div style="font-size:14px;letter-spacing:2px;opacity:.85;">GENERATOR PERANGKAT AJAR • KURIKULUM MERDEKA</div>
+  <div style="font-size:28px;font-weight:800;margin:8px 0 4px;">✨ Akses Selamanya, Sekali Bayar ✨</div>
+  <div style="font-size:15px;opacity:.9;">TP • ATP • Modul Ajar • LKPD • Absen Kartu QR • Jurnal Digital</div>
+  <div style="font-size:38px;font-weight:900;margin:18px 0 4px;">{HARGA_KODE}</div>
+  <div style="font-size:13px;opacity:.85;">sekali bayar, akun aktif SELAMANYA — tanpa langganan bulanan</div>
+</div>
+""", unsafe_allow_html=True)
+
+            colp1, colp2 = st.columns(2)
+            with colp1:
+                st.markdown("#### 1️⃣ Transfer ke DANA")
+                st.markdown(f"""
+<div style="border:2px dashed #1E4D8C;border-radius:12px;padding:16px;text-align:center;">
+  <div style="font-size:13px;color:#555;">Nomor DANA</div>
+  <div style="font-size:22px;font-weight:800;color:#1E4D8C;">{DANA_NOMOR}</div>
+  <div style="font-size:14px;color:#333;margin-top:4px;">a.n. {DANA_NAMA}</div>
+</div>
+""", unsafe_allow_html=True)
+            with colp2:
+                st.markdown("#### 2️⃣ Kirim Bukti ke WA Admin")
+                st.link_button("💬 Chat Admin di WhatsApp", wa_link, use_container_width=True)
+                st.caption(f"Atau simpan nomor: {WA_ADMIN_TAMPIL}")
+
+            st.divider()
+            st.markdown("#### 3️⃣ Sudah Transfer? Kirim Permintaan Kode di Sini")
+            st.caption("Setelah admin cek bukti transfer dari WA Anda, kode aktivasi akan "
+                       "dikirim balik ke nomor WA yang Anda isi di bawah.")
+            with st.form("form_minta_kode"):
+                nama_pemohon = st.text_input("Nama Lengkap", key="nama_pemohon")
+                sekolah_pemohon = st.text_input("Asal Sekolah", key="sekolah_pemohon")
+                wa_pemohon = st.text_input("No. WA Aktif (yang dipakai transfer/chat admin)",
+                                            key="wa_pemohon", placeholder="08xxxxxxxxxx")
+                kirim = st.form_submit_button("📩 Sudah Transfer, Kirim Permintaan Kode",
+                                               use_container_width=True)
+            if kirim:
+                if not nama_pemohon or not sekolah_pemohon or not wa_pemohon:
+                    st.error("⚠️ Mohon lengkapi semua isian.")
+                else:
+                    ok, hasil = buat_dan_kirim_permintaan_kode(nama_pemohon, sekolah_pemohon, wa_pemohon)
+                    if ok:
+                        st.success("✅ Permintaan terkirim! Admin akan memverifikasi pembayaran Anda "
+                                   "lalu mengirim kode aktivasi ke WhatsApp yang Anda isi.")
+                    else:
+                        st.error(f"❌ {hasil}")
     st.stop()
 
 
@@ -705,6 +811,22 @@ def baca_tabel_upload(uploaded_file):
 # ============================================================
 # FUNGSI PEMANGGILAN GROQ
 # ============================================================
+def bersihkan_html(teks: str) -> str:
+    """Jaring pengaman: kalau model AI tetap menyelipkan tag HTML (misal <textarea>, <img>,
+    <br>) meski sudah dilarang di prompt, buang tag-tag itu supaya tidak muncul sebagai
+    teks aneh/rusak di dokumen PDF/Word."""
+    if not teks:
+        return teks
+    # Buang tag HTML utuh (misal <img src="...">) beserta pasangannya kalau ada
+    teks = re.sub(r"<(textarea|div|input|table|tr|td|th|thead|tbody)[^>]*>.*?</\1>",
+                  " ______________ ", teks, flags=re.IGNORECASE | re.DOTALL)
+    # Ganti <br> jadi baris baru
+    teks = re.sub(r"<br\s*/?>", "\n", teks, flags=re.IGNORECASE)
+    # Buang sisa tag HTML tunggal apa pun yang masih tersisa (termasuk <img ...>)
+    teks = re.sub(r"<[^>]+>", "", teks)
+    return teks
+
+
 def call_groq(api_key: str, prompt: str, max_tokens: int = 6000) -> str:
     """Panggil Groq. Kalau kena limit token-per-menit (umum di akun gratis, sekarang
     dibatasi ketat ~8.000 TPM untuk hampir semua model), otomatis coba lagi dengan
@@ -720,7 +842,7 @@ def call_groq(api_key: str, prompt: str, max_tokens: int = 6000) -> str:
                 temperature=0.6,
                 max_completion_tokens=coba_max,
             )
-            return completion.choices[0].message.content
+            return bersihkan_html(completion.choices[0].message.content)
         except Exception as e:
             error_terakhir = e
             pesan = str(e)
