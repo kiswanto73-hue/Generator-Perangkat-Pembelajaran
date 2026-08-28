@@ -249,10 +249,10 @@ def notifikasi_wa_pendaftaran_baru(nama: str, email: str, kode: str):
 
 
 # --- Konfigurasi pembayaran & permintaan kode mandiri lewat poster promosi ---
-DANA_NOMOR = st.secrets.get("DANA_NOMOR", "") if hasattr(st, "secrets") else ""
-DANA_NAMA = st.secrets.get("DANA_NAMA", "") if hasattr(st, "secrets") else ""
-HARGA_KODE = st.secrets.get("HARGA_KODE", "") if hasattr(st, "secrets") else ""
-WA_ADMIN_TAMPIL = st.secrets.get("NOMOR_WA_ADMIN", "") if hasattr(st, "secrets") else ""
+DANA_NOMOR = st.secrets.get("082177723494", "") if hasattr(st, "secrets") else ""
+DANA_NAMA = st.secrets.get("Kiswanto", "") if hasattr(st, "secrets") else ""
+HARGA_KODE = st.secrets.get("Rp.100.000", "") if hasattr(st, "secrets") else ""
+WA_ADMIN_TAMPIL = st.secrets.get("082177723494", "") if hasattr(st, "secrets") else ""
 POSTER_AKTIF = bool(DANA_NOMOR and DANA_NAMA and HARGA_KODE and WA_ADMIN_TAMPIL)
 
 
