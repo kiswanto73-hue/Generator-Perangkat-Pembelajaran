@@ -214,24 +214,32 @@ def rpc_tautkan_kode(kode: str, user_id: str, email: str):
 
 # Notifikasi WhatsApp otomatis ke admin saat ada pendaftaran guru baru (via Fonnte).
 # Isi TOKEN & NOMOR di Secrets (bukan di kode), agar tidak ikut ter-upload ke GitHub publik.
-TOKEN_FONNTE = st.secrets.get("GiTqtRBCSnpuNbkZmb4p", "") if hasattr(st, "secrets") else ""
-NOMOR_WA_ADMIN = st.secrets.get("6282171779764", "") if hasattr(st, "secrets") else ""
+TOKEN_FONNTE = st.secrets.get("TOKEN_FONNTE", "") if hasattr(st, "secrets") else ""
+NOMOR_WA_ADMIN = st.secrets.get("NOMOR_WA_ADMIN", "") if hasattr(st, "secrets") else ""
 WA_NOTIF_AKTIF = bool(TOKEN_FONNTE and NOMOR_WA_ADMIN)
 
 
 def kirim_wa_fonnte(nomor: str, pesan: str, token: str) -> bool:
     """Kirim pesan WA lewat Fonnte. Dibungkus try/except agar kegagalan kirim WA
     (kuota habis, token salah, dll) TIDAK sampai menggagalkan pendaftaran guru."""
+    ok, _ = kirim_wa_fonnte_detail(nomor, pesan, token)
+    return ok
+
+
+def kirim_wa_fonnte_detail(nomor: str, pesan: str, token: str):
+    """Sama seperti kirim_wa_fonnte, tapi mengembalikan (berhasil, detail_teks) supaya
+    penyebab gagalnya kelihatan jelas — dipakai di tombol '🧪 Tes Kirim WA' Panel Admin."""
     try:
         resp = requests.post(
             "https://api.fonnte.com/send",
             headers={"Authorization": token},
             data={"target": nomor, "message": pesan},
-            timeout=10,
+            timeout=15,
         )
-        return resp.status_code == 200
-    except Exception:
-        return False
+        detail = f"HTTP {resp.status_code} — {resp.text[:500]}"
+        return resp.status_code == 200, detail
+    except Exception as e:
+        return False, f"Gagal menghubungi Fonnte: {e}"
 
 
 def notifikasi_wa_pendaftaran_baru(nama: str, email: str, kode: str):
@@ -249,10 +257,10 @@ def notifikasi_wa_pendaftaran_baru(nama: str, email: str, kode: str):
 
 
 # --- Konfigurasi pembayaran & permintaan kode mandiri lewat poster promosi ---
-DANA_NOMOR = st.secrets.get("DANA_NOMOR", "082177723494") if hasattr(st, "secrets") else ""
-DANA_NAMA = st.secrets.get("DANA_NAMA", "Kiswanto") if hasattr(st, "secrets") else ""
-HARGA_KODE = st.secrets.get("HARGA_KODE", "Rp.100.000") if hasattr(st, "secrets") else ""
-WA_ADMIN_TAMPIL = st.secrets.get("WA_ADMIN_TAMPIL", "082177723494") if hasattr(st, "secrets") else ""
+DANA_NOMOR = st.secrets.get("DANA_NOMOR", "") if hasattr(st, "secrets") else ""
+DANA_NAMA = st.secrets.get("DANA_NAMA", "") if hasattr(st, "secrets") else ""
+HARGA_KODE = st.secrets.get("HARGA_KODE", "") if hasattr(st, "secrets") else ""
+WA_ADMIN_TAMPIL = st.secrets.get("NOMOR_WA_ADMIN", "") if hasattr(st, "secrets") else ""
 POSTER_AKTIF = bool(DANA_NOMOR and DANA_NAMA and HARGA_KODE and WA_ADMIN_TAMPIL)
 
 
@@ -668,6 +676,29 @@ def tampilkan_panel_admin():
     else:
         st.info("Belum ada kode dibuat.")
 
+    st.divider()
+    st.markdown("### 🧪 Tes Kirim WA (Fonnte)")
+    st.caption("Kalau notifikasi WA otomatis tidak sampai, coba dulu di sini — pesan error "
+               "asli dari Fonnte akan ditampilkan supaya jelas penyebabnya (token salah, "
+               "device terputus, kuota habis, dll).")
+    if not (TOKEN_FONNTE and NOMOR_WA_ADMIN):
+        st.warning("⚠️ TOKEN_FONNTE dan/atau NOMOR_WA_ADMIN belum diisi di Secrets.")
+    else:
+        nomor_tes = st.text_input("Kirim tes ke nomor (kosongkan = kirim ke NOMOR_WA_ADMIN)",
+                                   value=NOMOR_WA_ADMIN, key="nomor_tes_wa")
+        if st.button("📤 Kirim Pesan Tes Sekarang", key="btn_tes_wa"):
+            ok, detail = kirim_wa_fonnte_detail(
+                nomor_tes or NOMOR_WA_ADMIN,
+                "✅ Ini pesan tes dari Panel Admin Generator Perangkat Ajar KKG. "
+                "Kalau pesan ini sampai, notifikasi WA otomatis sudah beres.",
+                TOKEN_FONNTE,
+            )
+            if ok:
+                st.success("✅ Terkirim! Cek WA di nomor tujuan.")
+            else:
+                st.error(f"❌ Gagal kirim. Detail dari Fonnte: {detail}")
+
+    st.divider()
     if st.button("🚪 Keluar dari Panel Admin"):
         st.session_state.admin_ok = False
         st.rerun()
