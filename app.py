@@ -481,13 +481,340 @@ def kosongkan_siswa():
     st.session_state.siswa_rows = []
 
 
+# ============================================================
+# PEMULIHAN AKUN - LUPA SANDI / LUPA AKUN (RESET OLEH ADMIN)
+# Alur: guru kirim permintaan di tab "Lupa Sandi/Akun" -> admin mencari akun di Panel Admin
+# -> klik Reset -> sandi sementara dikirim ke WhatsApp guru -> saat masuk, guru WAJIB
+# membuat sandi baru. Semua panggilan Supabase Auth untuk ganti sandi di bagian ini memakai
+# REST langsung (bukan client bersama get_supabase), supaya sesi guru lain yang sedang
+# login tidak ikut terpengaruh.
+# ============================================================
+def pesan_error_login(e) -> str:
+    teks = str(e)
+    if "Invalid login credentials" in teks:
+        return ("❌ Email atau kata sandi salah. Lupa sandi atau lupa email yang dipakai mendaftar? "
+                "Buka tab '🆘 Lupa Sandi/Akun' di atas.")
+    if "Email not confirmed" in teks:
+        return ("❌ Email Anda belum diverifikasi. Cek kotak masuk (dan folder spam), "
+                "lalu klik tautan verifikasi.")
+    return f"❌ Gagal masuk: {e}"
+
+
+def terjemah_pesan_auth(pesan: str) -> str:
+    p = str(pesan or "")
+    pl = p.lower()
+    if "different from the old password" in pl:
+        return "Sandi baru harus berbeda dari sandi lama."
+    if "at least" in pl and "character" in pl:
+        return "Sandi baru terlalu pendek (minimal 6 karakter)."
+    if "weak" in pl:
+        return "Sandi baru terlalu lemah. Gunakan campuran huruf dan angka."
+    if "expired" in pl or "invalid jwt" in pl:
+        return "Sesi sudah habis. Silakan keluar lalu masuk kembali."
+    return p or "Terjadi kesalahan yang tidak dikenal."
+
+
+def buat_sandi_sementara(panjang: int = 10) -> str:
+    """Sandi acak yang mudah diketik ulang di HP (tanpa karakter yang mirip: O/0, l/1/I)."""
+    import secrets as _secrets
+    huruf = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
+    while True:
+        s = "".join(_secrets.choice(huruf) for _ in range(panjang))
+        if any(c.islower() for c in s) and any(c.isupper() for c in s) and any(c.isdigit() for c in s):
+            return s
+
+
+def normalisasi_wa(nomor: str) -> str:
+    """08xx / +628xx / 628xx -> 628xx (format yang diterima Fonnte)."""
+    angka = re.sub(r"\D", "", str(nomor or ""))
+    if angka.startswith("0"):
+        angka = "62" + angka[1:]
+    elif angka.startswith("8"):
+        angka = "62" + angka
+    return angka
+
+
+def cari_wa_dalam_teks(teks: str) -> str:
+    """Ambil nomor HP Indonesia pertama dari teks catatan (mis. 'WA 0812-3456-7890')."""
+    m = re.search(r"(?:\+?62|0)8[\d\s\-]{7,14}\d", str(teks or ""))
+    return re.sub(r"[^\d+]", "", m.group(0)) if m else ""
+
+
+def _fmt_waktu(v) -> str:
+    if not v:
+        return "-"
+    try:
+        return v.strftime("%d-%m-%Y %H:%M")
+    except Exception:
+        return str(v)[:16].replace("T", " ")
+
+
+# ---------- Sisi guru: verifikasi & ganti sandi ----------
+def auth_verifikasi_sandi(email: str, sandi: str):
+    """Cek email+sandi langsung ke Supabase Auth (REST). Mengembalikan (ok, access_token_atau_pesan)."""
+    try:
+        r = requests.post(f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                          headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+                          json={"email": email, "password": sandi}, timeout=15)
+    except Exception as e:
+        return False, f"Gagal menghubungi server: {e}"
+    if r.status_code == 200:
+        return True, r.json().get("access_token", "")
+    return False, "Sandi saat ini tidak cocok."
+
+
+def auth_ganti_sandi(access_token: str, sandi_lama: str, sandi_baru: str):
+    """Ganti sandi akun pemilik access_token (REST) sekaligus mencabut tanda 'wajib ganti sandi'."""
+    try:
+        r = requests.put(f"{SUPABASE_URL}/auth/v1/user",
+                         headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {access_token}",
+                                  "Content-Type": "application/json"},
+                         json={"password": sandi_baru, "current_password": sandi_lama,
+                               "data": {"wajib_ganti_sandi": False}}, timeout=15)
+    except Exception as e:
+        return False, f"Gagal menghubungi server: {e}"
+    if r.status_code == 200:
+        return True, ""
+    try:
+        j = r.json()
+        pesan = j.get("msg") or j.get("message") or j.get("error_description") or r.text
+    except Exception:
+        pesan = r.text
+    return False, terjemah_pesan_auth(pesan)
+
+
+def cek_wajib_ganti_sandi() -> bool:
+    """True jika admin baru saja mereset sandi akun ini, sehingga guru wajib membuat sandi baru.
+    Hasil dicek sekali per sesi login lalu disimpan di session_state."""
+    u = st.session_state.user
+    if u is None:
+        return False
+    if "wajib_ganti" not in u:
+        try:
+            r = requests.get(f"{SUPABASE_URL}/auth/v1/user",
+                             headers={"apikey": SUPABASE_KEY,
+                                      "Authorization": f"Bearer {u.get('access_token', '')}"},
+                             timeout=15)
+            if r.status_code == 200:
+                u["wajib_ganti"] = bool((r.json().get("user_metadata") or {}).get("wajib_ganti_sandi"))
+        except Exception:
+            pass
+    return bool(u.get("wajib_ganti"))
+
+
+def form_ganti_sandi(key: str, label_lama: str = "Kata Sandi Saat Ini") -> bool:
+    """Formulir ganti sandi. Mengembalikan True hanya jika sandi berhasil diganti."""
+    with st.form(key, clear_on_submit=True):
+        lama = st.text_input(label_lama, type="password", key=f"{key}_lama")
+        baru = st.text_input("Kata Sandi Baru (minimal 6 karakter)", type="password", key=f"{key}_baru")
+        ulang = st.text_input("Ulangi Kata Sandi Baru", type="password", key=f"{key}_ulang")
+        kirim = st.form_submit_button("💾 Simpan Sandi Baru", use_container_width=True)
+    if not kirim:
+        return False
+    if not lama or not baru or not ulang:
+        st.error("⚠️ Mohon isi semua kolom.")
+        return False
+    if len(baru) < 6:
+        st.error("⚠️ Kata sandi baru minimal 6 karakter.")
+        return False
+    if baru != ulang:
+        st.error("⚠️ Pengulangan kata sandi baru tidak sama.")
+        return False
+    if baru == lama:
+        st.error("⚠️ Kata sandi baru harus berbeda dari yang lama.")
+        return False
+    ok, hasil = auth_verifikasi_sandi(st.session_state.user["email"], lama)
+    if not ok:
+        st.error(f"❌ {hasil}")
+        return False
+    ok, pesan = auth_ganti_sandi(hasil, lama, baru)
+    if not ok:
+        st.error(f"❌ Gagal mengganti sandi: {pesan}")
+        return False
+    st.session_state.user["wajib_ganti"] = False
+    return True
+
+
+def tampilkan_ganti_sandi_wajib():
+    """Halaman penghalang: guru yang sandinya baru direset admin harus membuat sandi baru dulu."""
+    st.title("🔐 Buat Kata Sandi Baru")
+    st.info("Sandi Anda baru saja direset oleh admin. Demi keamanan, buat kata sandi baru "
+            "sebelum melanjutkan memakai aplikasi.")
+    st.caption(f"Akun: {st.session_state.user['email']}")
+    if form_ganti_sandi("form_ganti_wajib", "Sandi Sementara (dari admin)"):
+        st.success("✅ Kata sandi baru tersimpan. Memuat aplikasi...")
+        st.rerun()
+    if st.button("🚪 Keluar", key="btn_keluar_wajib"):
+        sb_keluar()
+        st.rerun()
+    st.stop()
+
+
+def tampilkan_tab_lupa_sandi():
+    """Isi tab '🆘 Lupa Sandi/Akun' di halaman login (publik, belum login)."""
+    st.markdown("#### 🆘 Lupa Kata Sandi atau Lupa Akun?")
+    st.caption("Isi data di bawah. Admin akan mencocokkan data Anda, lalu mengirim **sandi sementara** "
+               "ke WhatsApp Anda. Setelah masuk dengan sandi sementara itu, Anda akan diminta membuat "
+               "sandi baru. Lupa email yang dipakai mendaftar? Cukup isi nama dan sekolah, "
+               "nanti admin yang mencarikan.")
+    with st.form("form_lupa_sandi"):
+        nama = st.text_input("Nama Lengkap (seperti saat mendaftar)", key="lupa_nama")
+        sekolah = st.text_input("Asal Sekolah", key="lupa_sekolah")
+        email = st.text_input("Email (kosongkan jika lupa)", key="lupa_email")
+        wa = st.text_input("No. WA Aktif (tujuan pengiriman sandi sementara)", key="lupa_wa",
+                           placeholder="08xxxxxxxxxx")
+        kirim = st.form_submit_button("📩 Kirim Permintaan ke Admin", use_container_width=True)
+    if kirim:
+        wa_norm = normalisasi_wa(wa)
+        if not nama.strip() or not sekolah.strip() or len(wa_norm) < 10:
+            st.error("⚠️ Mohon isi nama, sekolah, dan nomor WA yang valid.")
+        elif st.session_state.get("_lupa_hitung", 0) >= 3:
+            st.warning("⚠️ Permintaan sudah dikirim beberapa kali dari perangkat ini. "
+                       "Mohon tunggu admin menghubungi Anda lewat WhatsApp.")
+        elif not WA_NOTIF_AKTIF:
+            st.error("❌ Pengiriman otomatis belum aktif. Silakan hubungi admin lewat tombol WhatsApp di bawah.")
+        else:
+            pesan = (
+                "*PERMINTAAN RESET SANDI / LUPA AKUN*\n"
+                "Ada guru yang meminta bantuan untuk bisa masuk kembali:\n"
+                f"👤 *Nama:* {nama.strip()}\n"
+                f"🏫 *Sekolah:* {sekolah.strip()}\n"
+                f"📧 *Email (disebut pemohon):* {email.strip() or '(lupa)'}\n"
+                f"📱 *No. WA pemohon:* {wa_norm}\n\n"
+                "Langkah admin: buka Panel Admin (?admin=1) > bagian *Reset Sandi / Cari Akun Guru*, "
+                "cari nama atau emailnya, pastikan nomor WA cocok dengan data pendaftaran, lalu klik Reset."
+            )
+            if kirim_wa_fonnte(NOMOR_WA_ADMIN, pesan, TOKEN_FONNTE):
+                st.session_state["_lupa_hitung"] = st.session_state.get("_lupa_hitung", 0) + 1
+                st.success("✅ Permintaan terkirim. Admin akan menghubungi Anda lewat WhatsApp "
+                           "setelah mencocokkan data Anda.")
+            else:
+                st.error("❌ Permintaan gagal terkirim. Silakan hubungi admin lewat tombol WhatsApp di bawah.")
+    if WA_ADMIN_TAMPIL:
+        pesan_wa = ("Halo Admin, saya lupa kata sandi/akun Generator Perangkat Ajar KKG. "
+                    "Nama: ... Sekolah: ...")
+        st.link_button("💬 Atau chat Admin langsung di WhatsApp",
+                       f"https://wa.me/{WA_ADMIN_TAMPIL}?text={requests.utils.quote(pesan_wa)}",
+                       use_container_width=True)
+
+
+# ---------- Sisi admin: cari akun & reset sandi ----------
+def admin_daftar_guru(sb_admin) -> list:
+    """Gabungkan daftar akun (Supabase Auth) dengan data kode lisensi (nama/WA/sekolah di catatan)."""
+    users, halaman = [], 1
+    while halaman <= 20:
+        res = sb_admin.auth.admin.list_users(page=halaman, per_page=200)
+        batch = res if isinstance(res, list) else (getattr(res, "users", None) or [])
+        users.extend(batch)
+        if len(batch) < 200:
+            break
+        halaman += 1
+    kode_per_email = {}
+    try:
+        for r in (sb_admin.table("kode_lisensi").select("*").execute().data or []):
+            em = str(r.get("dipakai_oleh_email") or "").strip().lower()
+            if em:
+                kode_per_email[em] = r
+    except Exception:
+        pass
+    hasil = []
+    for u in users:
+        email = str(getattr(u, "email", "") or "")
+        meta = dict(getattr(u, "user_metadata", None) or {})
+        kr = kode_per_email.get(email.lower(), {})
+        catatan = str(kr.get("catatan") or "")
+        wa = cari_wa_dalam_teks(catatan)
+        item = {
+            "id": str(getattr(u, "id", "")), "email": email,
+            "nama": str(meta.get("nama_lengkap") or ""), "kode": str(kr.get("kode") or ""),
+            "catatan": catatan, "wa": wa, "meta": meta,
+            "dibuat_raw": str(getattr(u, "created_at", "") or ""),
+            "dibuat": _fmt_waktu(getattr(u, "created_at", None)),
+            "masuk_terakhir": _fmt_waktu(getattr(u, "last_sign_in_at", None)),
+        }
+        item["cari"] = " ".join([email, item["nama"], item["kode"], catatan, wa,
+                                 normalisasi_wa(wa)]).lower()
+        hasil.append(item)
+    hasil.sort(key=lambda x: x["dibuat_raw"], reverse=True)
+    return hasil
+
+
+def panel_reset_sandi(sb_admin):
+    """Bagian Panel Admin: cari akun guru & reset sandi (sandi sementara dikirim lewat WA)."""
+    st.markdown("### 🔑 Reset Sandi / Cari Akun Guru")
+    st.caption("Untuk guru yang lupa sandi atau lupa email. Sandi sementara dibuat otomatis lalu dikirim "
+               "ke WhatsApp guru; saat guru masuk, aplikasi langsung meminta sandi baru.")
+    st.warning("🛡️ Reset hanya untuk guru yang benar-benar meminta. Cocokkan dulu nomor WA pemohon dengan "
+               "data pendaftaran (kolom 'WA di catatan') sebelum mereset, supaya akun tidak bisa "
+               "diambil alih orang lain.")
+    try:
+        guru = admin_daftar_guru(sb_admin)
+    except Exception as e:
+        st.error(f"❌ Gagal memuat daftar akun: {e}")
+        return
+    cari = st.text_input("Cari (nama, email, sekolah, No. WA, atau kode aktivasi)",
+                         key="admin_cari_guru").strip().lower()
+    hasil = [g for g in guru if not cari or cari in g["cari"]]
+    st.caption(f"{len(hasil)} akun cocok dari total {len(guru)} akun terdaftar"
+               + (" (ditampilkan 50 teratas)." if len(hasil) > 50 else "."))
+    if not hasil:
+        st.info("Tidak ada akun yang cocok dengan pencarian tersebut.")
+        return
+    hasil = hasil[:50]
+    st.dataframe(pd.DataFrame([{
+        "Nama": g["nama"], "Email": g["email"], "Kode": g["kode"], "WA di catatan": g["wa"],
+        "Terdaftar": g["dibuat"], "Terakhir masuk": g["masuk_terakhir"], "Catatan": g["catatan"],
+    } for g in hasil]), use_container_width=True, hide_index=True)
+
+    opsi = {f"{g['nama'] or '(tanpa nama)'} — {g['email']}": g for g in hasil}
+    pilih = st.selectbox("Pilih akun yang akan direset", list(opsi.keys()), key="admin_pilih_guru")
+    g = opsi[pilih]
+    wa_target = st.text_input("Kirim sandi sementara ke WhatsApp nomor", value=g["wa"],
+                              key=f"admin_reset_wa_{g['id']}")
+    if g["wa"] and normalisasi_wa(wa_target) != normalisasi_wa(g["wa"]):
+        st.warning("⚠️ Nomor ini BERBEDA dari nomor WA yang tercatat saat pendaftaran. "
+                   "Pastikan Anda sudah memverifikasi pemohon lewat cara lain.")
+    yakin = st.checkbox("Saya sudah memastikan permintaan ini benar dari guru yang bersangkutan",
+                        key=f"admin_reset_yakin_{g['id']}")
+    if st.button("🔐 Reset Sandi & Kirim ke WA", key=f"admin_reset_btn_{g['id']}", disabled=not yakin):
+        sandi_baru = buat_sandi_sementara()
+        meta = dict(g["meta"])
+        meta["wajib_ganti_sandi"] = True
+        try:
+            sb_admin.auth.admin.update_user_by_id(g["id"], {"password": sandi_baru, "user_metadata": meta})
+        except Exception as e:
+            st.error(f"❌ Gagal mereset sandi: {e}")
+            return
+        st.success(f"✅ Sandi akun {g['email']} berhasil direset.")
+        nomor = normalisasi_wa(wa_target)
+        terkirim, detail = False, ""
+        if WA_NOTIF_AKTIF and len(nomor) >= 10:
+            pesan = (
+                "*RESET KATA SANDI - Generator Perangkat Ajar KKG*\n"
+                f"Halo {g['nama'] or 'Bapak/Ibu Guru'}, permintaan reset sandi Anda sudah diproses admin.\n"
+                f"📧 *Email:* {g['email']}\n"
+                f"🔑 *Sandi sementara:* {sandi_baru}\n\n"
+                "Silakan masuk memakai sandi sementara ini. Aplikasi akan langsung meminta Anda "
+                "membuat sandi baru. Jangan bagikan sandi ini kepada siapa pun."
+            )
+            terkirim, detail = kirim_wa_fonnte_detail(nomor, pesan, TOKEN_FONNTE)
+        if terkirim:
+            st.success("📲 Sandi sementara sudah dikirim ke WhatsApp guru.")
+        else:
+            st.warning("⚠️ Pesan WA tidak terkirim otomatis"
+                       + (f" ({detail})" if detail else "")
+                       + ". Kirim sandi di bawah ini ke guru secara manual lewat WA pribadi Anda.")
+        st.caption("Sandi sementara (hanya tampil sekali, jangan dibagikan ke tempat umum):")
+        st.code(sandi_baru, language=None)
+
+
 def tampilkan_gerbang_login():
     """Tampilkan formulir Masuk/Daftar. Menghentikan eksekusi (st.stop()) sampai berhasil login."""
     st.title("📚 Generator Perangkat Ajar Kurikulum Merdeka")
     st.caption("Silakan masuk atau daftar akun guru untuk mulai menggunakan aplikasi. "
                "Data jurnal & absen Anda akan tersimpan permanen dan hanya bisa diakses oleh akun Anda sendiri.")
-    tab_masuk, tab_daftar, tab_beli = st.tabs(
-        ["🔑 Masuk", "📝 Daftar Akun Baru", "🛒 Belum Punya Kode?"])
+    tab_masuk, tab_daftar, tab_beli, tab_lupa = st.tabs(
+        ["🔑 Masuk", "📝 Daftar Akun Baru", "🛒 Belum Punya Kode?", "🆘 Lupa Sandi/Akun"])
 
     with tab_masuk:
         with st.form("form_masuk"):
@@ -510,7 +837,8 @@ def tampilkan_gerbang_login():
                     else:
                         st.error("❌ Email atau kata sandi salah.")
                 except Exception as e:
-                    st.error(f"❌ Gagal masuk: {e}")
+                    st.error(pesan_error_login(e))
+        st.caption("Lupa sandi atau lupa email yang dipakai mendaftar? Buka tab **🆘 Lupa Sandi/Akun**.")
 
     with tab_daftar:
         st.caption("Butuh **kode aktivasi** dari pemilik aplikasi untuk mendaftar. "
@@ -608,6 +936,9 @@ def tampilkan_gerbang_login():
                                    "lalu mengirim kode aktivasi ke WhatsApp yang Anda isi.")
                     else:
                         st.error(f"❌ {hasil}")
+
+    with tab_lupa:
+        tampilkan_tab_lupa_sandi()
     st.stop()
 
 
@@ -677,6 +1008,9 @@ def tampilkan_panel_admin():
         st.info("Belum ada kode dibuat.")
 
     st.divider()
+    panel_reset_sandi(sb_admin)
+
+    st.divider()
     st.markdown("### 🧪 Tes Kirim WA (Fonnte)")
     st.caption("Kalau notifikasi WA otomatis tidak sampai, coba dulu di sini — pesan error "
                "asli dari Fonnte akan ditampilkan supaya jelas penyebabnya (token salah, "
@@ -710,6 +1044,9 @@ if "admin" in st.query_params:
 
 if AUTH_AKTIF and st.session_state.user is None:
     tampilkan_gerbang_login()
+
+if AUTH_AKTIF and st.session_state.user is not None and cek_wajib_ganti_sandi():
+    tampilkan_ganti_sandi_wajib()
 
 if AUTH_AKTIF and st.session_state.user is not None and not st.session_state.data_loaded:
     db_muat_data(st.session_state.user["id"])
@@ -1230,6 +1567,9 @@ with st.sidebar:
         if st.button("🚪 Keluar", key="btn_keluar", use_container_width=True):
             sb_keluar()
             st.rerun()
+        with st.expander("🔐 Ganti Kata Sandi"):
+            if form_ganti_sandi("form_ganti_sandi", "Kata Sandi Saat Ini"):
+                st.success("✅ Kata sandi berhasil diganti.")
         st.divider()
     st.header("⚙️ Pengaturan")
     groq_api_key = st.text_input(
