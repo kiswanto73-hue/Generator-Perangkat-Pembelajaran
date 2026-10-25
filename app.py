@@ -1,5 +1,6 @@
 import streamlit as st
 from groq import Groq
+import os
 import re
 import html
 import requests
@@ -209,6 +210,12 @@ if "user" not in st.session_state:
     st.session_state.user = None
 if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
+if "groq_key_tersimpan" not in st.session_state:
+    st.session_state.groq_key_tersimpan = ""
+if "groq_key_loaded" not in st.session_state:
+    st.session_state.groq_key_loaded = False
+if "groq_key_ganti" not in st.session_state:
+    st.session_state.groq_key_ganti = False
 
 
 # ============================================================
@@ -229,9 +236,51 @@ ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "") if hasattr(st, "secrets") 
 ADMIN_AKTIF = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY and ADMIN_PASSWORD and create_client is not None)
 
 
-@st.cache_resource
+def _jwt_kedaluwarsa(token: str, sisa_detik: int = 60) -> bool:
+    """True jika JWT sudah/hampir kedaluwarsa (cek klaim 'exp' tanpa verifikasi tanda tangan)."""
+    try:
+        import base64, json, time
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0)
+        return time.time() >= exp - sisa_detik
+    except Exception:
+        return False
+
+
+def token_pengguna_segar() -> str:
+    """Kembalikan access_token guru yang login; otomatis diperbarui via refresh_token jika sudah kedaluwarsa."""
+    u = st.session_state.get("user")
+    if not u:
+        return ""
+    token = u.get("access_token", "")
+    if token and _jwt_kedaluwarsa(token) and u.get("refresh_token"):
+        try:
+            r = requests.post(f"{SUPABASE_URL}/auth/v1/token?grant_type=refresh_token",
+                              headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+                              json={"refresh_token": u["refresh_token"]}, timeout=15)
+            if r.status_code == 200:
+                j = r.json()
+                u["access_token"] = j.get("access_token", token)
+                u["refresh_token"] = j.get("refresh_token", u["refresh_token"])
+                token = u["access_token"]
+        except Exception:
+            pass
+    return token
+
+
 def get_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    """Client BARU per panggilan (tidak di-cache bersama), memakai token guru yang sedang login
+    di sesi ini. Sebelumnya client dibagi lintas sesi sehingga JWT-nya kedaluwarsa (PGRST303)
+    dan bisa tertukar antar guru."""
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    token = token_pengguna_segar()
+    if token:
+        try:
+            sb.postgrest.auth(token)
+        except Exception:
+            pass
+    return sb
 
 
 @st.cache_resource
@@ -361,6 +410,66 @@ def sb_masuk(email: str, password: str):
     return res
 
 
+# ---------- Penyimpanan API Key Groq (sekali input, tersimpan permanen) ----------
+# Mode login (Supabase aktif): disimpan di user_metadata akun guru -> terikat ke akun masing-masing,
+#   otomatis terisi setiap kali guru masuk, di perangkat mana pun.
+# Mode tanpa login (pemakaian lokal/pribadi): disimpan di file .groq_api_key di folder aplikasi.
+FILE_KUNCI_GROQ = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".groq_api_key")
+
+
+def _kunci_api_header():
+    token = token_pengguna_segar()
+    return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"}
+
+
+def kunci_api_muat() -> str:
+    """Ambil API Key Groq yang tersimpan (string kosong jika belum ada)."""
+    if AUTH_AKTIF:
+        if not st.session_state.user:
+            return ""
+        try:
+            r = requests.get(f"{SUPABASE_URL}/auth/v1/user", headers=_kunci_api_header(), timeout=15)
+            if r.status_code == 200:
+                return str((r.json().get("user_metadata") or {}).get("groq_api_key", "") or "").strip()
+        except Exception:
+            pass
+        return ""
+    try:
+        with open(FILE_KUNCI_GROQ, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def kunci_api_simpan(kunci: str):
+    """Simpan (atau hapus jika kosong) API Key Groq. Mengembalikan (ok, pesan_error)."""
+    kunci = (kunci or "").strip()
+    if AUTH_AKTIF:
+        try:
+            r = requests.put(f"{SUPABASE_URL}/auth/v1/user", headers=_kunci_api_header(),
+                             json={"data": {"groq_api_key": kunci}}, timeout=15)
+        except Exception as e:
+            return False, f"Gagal menghubungi server: {e}"
+        if r.status_code == 200:
+            return True, ""
+        return False, ("Sesi login mungkin sudah kedaluwarsa. Klik Keluar lalu masuk kembali, "
+                       "kemudian simpan ulang API Key.")
+    try:
+        if kunci:
+            with open(FILE_KUNCI_GROQ, "w", encoding="utf-8") as f:
+                f.write(kunci)
+            try:
+                os.chmod(FILE_KUNCI_GROQ, 0o600)
+            except Exception:
+                pass
+        elif os.path.exists(FILE_KUNCI_GROQ):
+            os.remove(FILE_KUNCI_GROQ)
+        return True, ""
+    except Exception as e:
+        return False, f"Tidak bisa menulis file penyimpanan: {e}"
+
+
 def sb_keluar():
     try:
         get_supabase().auth.sign_out()
@@ -368,6 +477,9 @@ def sb_keluar():
         pass
     st.session_state.user = None
     st.session_state.data_loaded = False
+    st.session_state.groq_key_tersimpan = ""
+    st.session_state.groq_key_loaded = False
+    st.session_state.groq_key_ganti = False
     st.session_state.jurnal_rows = []
     st.session_state.siswa_rows = []
 
@@ -650,7 +762,7 @@ def cek_wajib_ganti_sandi() -> bool:
         try:
             r = requests.get(f"{SUPABASE_URL}/auth/v1/user",
                              headers={"apikey": SUPABASE_KEY,
-                                      "Authorization": f"Bearer {u.get('access_token', '')}"},
+                                      "Authorization": f"Bearer {token_pengguna_segar()}"},
                              timeout=15)
             if r.status_code == 200:
                 u["wajib_ganti"] = bool((r.json().get("user_metadata") or {}).get("wajib_ganti_sandi"))
@@ -888,6 +1000,7 @@ def tampilkan_gerbang_login():
                         st.session_state.user = {
                             "id": res.user.id, "email": res.user.email,
                             "access_token": res.session.access_token if res.session else "",
+                            "refresh_token": res.session.refresh_token if res.session else "",
                         }
                         st.success("✅ Berhasil masuk!")
                         st.rerun()
@@ -1108,6 +1221,10 @@ if AUTH_AKTIF and st.session_state.user is not None and cek_wajib_ganti_sandi():
 if AUTH_AKTIF and st.session_state.user is not None and not st.session_state.data_loaded:
     db_muat_data(st.session_state.user["id"])
     st.session_state.data_loaded = True
+
+if not st.session_state.groq_key_loaded:
+    st.session_state.groq_key_tersimpan = kunci_api_muat()
+    st.session_state.groq_key_loaded = True
 
 
 # ============================================================
@@ -1892,10 +2009,51 @@ with st.sidebar:
                 st.success("✅ Kata sandi berhasil diganti.")
         st.divider()
     st.header("⚙️ Pengaturan")
-    groq_api_key = st.text_input(
-        "🔑 API Key Groq", type="password",
-        help="Dapatkan API key gratis di console.groq.com. Key TIDAK disimpan di server, "
-             "hanya dipakai selama sesi ini.",
+    key_input = ""
+    if st.session_state.groq_key_tersimpan and not st.session_state.groq_key_ganti:
+        _k = st.session_state.groq_key_tersimpan
+        st.success(f"🔑 API Key Groq tersimpan ({_k[:4]}…{_k[-4:]})")
+        if st.button("✏️ Ganti / Hapus API Key", key="btn_ganti_key", use_container_width=True):
+            st.session_state.groq_key_ganti = True
+            st.rerun()
+    else:
+        key_input = st.text_input(
+            "🔑 API Key Groq", type="password", key="input_groq_key",
+            help="Dapatkan API key gratis di console.groq.com. Cukup diinput sekali, "
+                 "lalu klik Simpan agar tersimpan dan tidak perlu diisi ulang.",
+        )
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            if st.button("💾 Simpan", key="btn_simpan_key", use_container_width=True):
+                if not key_input.strip():
+                    st.error("⚠️ API Key masih kosong.")
+                else:
+                    ok_k, err_k = kunci_api_simpan(key_input)
+                    st.session_state.groq_key_tersimpan = key_input.strip()
+                    st.session_state.groq_key_ganti = False
+                    if not ok_k:
+                        st.session_state.pesan_key = f"⚠️ Dipakai untuk sesi ini, tapi belum tersimpan permanen: {err_k}"
+                    st.rerun()
+        with _c2:
+            if st.session_state.groq_key_tersimpan:
+                if st.button("🗑️ Hapus", key="btn_hapus_key", use_container_width=True):
+                    ok_k, err_k = kunci_api_simpan("")
+                    st.session_state.groq_key_tersimpan = ""
+                    st.session_state.groq_key_ganti = False
+                    if not ok_k:
+                        st.session_state.pesan_key = f"⚠️ Gagal menghapus dari penyimpanan: {err_k}"
+                    st.rerun()
+        if st.session_state.groq_key_tersimpan:
+            if st.button("↩️ Batal", key="btn_batal_key", use_container_width=True):
+                st.session_state.groq_key_ganti = False
+                st.rerun()
+    if st.session_state.get("pesan_key"):
+        st.warning(st.session_state.pop("pesan_key"))
+    groq_api_key = st.session_state.groq_key_tersimpan or key_input.strip()
+    st.caption(
+        "🔒 API Key tersimpan di akun Anda dan otomatis terisi saat masuk berikutnya."
+        if AUTH_AKTIF else
+        "🔒 API Key tersimpan di server aplikasi ini dan otomatis terisi saat dibuka kembali."
     )
     st.caption(
         "⚠️ Jangan pernah menempelkan API key langsung di dalam kode. Jika key Anda pernah "
@@ -3014,7 +3172,7 @@ with sub_scan:
                    "Silakan masuk/daftar dulu.")
     else:
         user_id = st.session_state.user["id"]
-        access_token = st.session_state.user.get("access_token", "")
+        access_token = token_pengguna_segar()
         c1, c2 = st.columns(2)
         with c1:
             scan_tanggal = st.date_input("Tanggal Absen", value=date.today(), key="scan_tanggal")
