@@ -1,6 +1,7 @@
 import streamlit as st
 from groq import Groq
 import re
+import html
 import requests
 import pandas as pd
 from datetime import datetime, date, timedelta
@@ -8,6 +9,7 @@ from io import BytesIO
 
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import cm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
@@ -18,7 +20,9 @@ from reportlab.platypus import (
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 import qrcode
 
 try:
@@ -72,6 +76,17 @@ st.markdown("""
         background-color: #EEF3FA; border-radius: 8px 8px 0 0; padding: 8px 16px; font-weight: 600;
     }
     .stTabs [aria-selected="true"] { background-color: #1E4D8C !important; color: white !important; }
+    .stMarkdown table { width: 100%; border-collapse: collapse; }
+    .stMarkdown table th { background: #1E4D8C; color: #FFFFFF; text-align: center; }
+    .stMarkdown table th, .stMarkdown table td {
+        border: 1px solid #C5D0E0; padding: 6px 9px; vertical-align: top;
+    }
+    .stMarkdown table tr:nth-child(even) td { background: #F4F7FB; }
+    .stMarkdown table.kv-tbl { width: auto; max-width: 100%; margin-bottom: 0.6rem; }
+    .stMarkdown table.kv-tbl td, .stMarkdown table.kv-tbl tr td { border: none !important; background: transparent !important;
+        padding: 2px 6px; }
+    .stMarkdown table.kv-tbl td.k { font-weight: 600; white-space: nowrap; width: 1%; }
+    .stMarkdown table.kv-tbl td.c { width: 1%; text-align: center; }
     div[data-testid="stMetric"], .kkg-card {
         background: #FFFFFF; border: 1px solid #E3E9F2; border-radius: 12px;
         padding: 14px 18px; box-shadow: 0 2px 8px rgba(30,77,140,0.06);
@@ -109,6 +124,48 @@ Dokumen ini akan dicetak ke PDF/Word, BUKAN ditampilkan sebagai halaman web. Kar
   JANGAN PERNAH menyertakan tag <img>, URL gambar, atau tautan gambar apa pun (termasuk dari
   placeholder.com atau sejenisnya) — gambar sungguhan tidak bisa dihasilkan lewat teks.
 - Gunakan HANYA format Markdown biasa (heading #, bold **, tabel markdown, list -), tanpa HTML.
+"""
+
+
+# ============================================================
+# 8 DIMENSI PROFIL LULUSAN (acuan wajib pada TP/ATP, Modul Ajar, dan LKPD)
+# ============================================================
+PROFIL_LULUSAN = [
+    ("Keimanan dan Ketakwaan kepada Tuhan YME",
+     "Memiliki keyakinan spiritual, menjalankan ajaran agama/kepercayaan, serta mengamalkan nilai-nilai moral dan akhlak mulia dalam kehidupan sehari-hari."),
+    ("Kewargaan",
+     "Memiliki rasa cinta tanah air, kesadaran berbangsa dan bernegara, pemahaman hak dan kewajiban warga negara, serta kepedulian terhadap isu-isu sosial dan lingkungan."),
+    ("Penalaran Kritis",
+     "Mampu memproses informasi secara objektif, menganalisis, mengevaluasi, menyusun argumen yang logis, serta mengambil keputusan berdasarkan data dan fakta."),
+    ("Kreativitas",
+     "Mampu menghasilkan gagasan, karya, atau tindakan yang orisinal, bernilai tambah, serta menemukan solusi inovatif dalam menghadapi berbagai tantangan."),
+    ("Kolaborasi",
+     "Mampu bekerja sama secara efektif dengan orang lain, berkomunikasi dengan baik, saling menghargai, dan berkontribusi aktif dalam mencapai tujuan bersama."),
+    ("Kemandirian",
+     "Memiliki kesadaran akan potensi dan keterbatasan diri, mampu mengontrol emosi, menetapkan target belajar, serta bertanggung jawab atas proses dan hasil belajarnya."),
+    ("Kesehatan dan Kesejahteraan Diri",
+     "Menjaga kesehatan fisik dan mental, memiliki gaya hidup sehat, tangguh (resilient), serta mampu menciptakan keseimbangan hidup."),
+    ("Kebinekaan Global",
+     "Mempertahankan identitas budaya luhur bangsa, terbuka dalam berinteraksi dengan budaya lain, serta memiliki wawasan global untuk hidup harmonis dalam masyarakat dunia yang beragam."),
+]
+PROFIL_NAMA = [n for n, _ in PROFIL_LULUSAN]
+
+
+def profil_lulusan_guide(terpilih=None) -> str:
+    """Teks pedoman 8 dimensi Profil Lulusan untuk disisipkan ke prompt AI."""
+    terpilih = [p for p in (terpilih or PROFIL_NAMA) if p in PROFIL_NAMA] or PROFIL_NAMA
+    daftar = "\n".join(f"{i}. {n} - {d}" for i, (n, d) in enumerate(PROFIL_LULUSAN, 1) if n in terpilih)
+    return f"""
+PEDOMAN WAJIB - 8 DIMENSI PROFIL LULUSAN
+Gunakan HANYA nama dimensi resmi berikut (tulis persis, jangan diganti istilah lain seperti
+"Profil Pelajar Pancasila"). Dimensi yang menjadi FOKUS dokumen ini:
+{daftar}
+
+Aturan penerapan:
+- Setiap dimensi fokus harus tampak NYATA pada kegiatan pembelajaran (bukan sekadar disebut), dan
+  dapat diamati lewat indikator perilaku murid SD yang konkret.
+- Tulis dimensi di dalam tabel/kalimat memakai nama resminya, contoh: "Kolaborasi", "Penalaran Kritis".
+- Jangan memaksakan: jelaskan keterkaitan dimensi dengan materi secara masuk akal dan spesifik.
 """
 
 SUBJECT_OPTIONS = ["PAI & BP", "Bahasa Indonesia", "Matematika", "IPAS", "PJOK",
@@ -1228,50 +1285,159 @@ def call_groq(api_key: str, prompt: str, max_tokens: int = 6000) -> str:
 
 
 # ============================================================
-# PARSER MARKDOWN BERSAMA (dipakai untuk PDF & DOCX)
+# PARSER MARKDOWN BERSAMA (dipakai untuk PDF, DOCX & tampilan layar)
 # ============================================================
+_RE_BOLD_LABEL = re.compile(r"^\*\*(.{1,60}?)\*\*\s*:\s*(\S.*)$")
+_RE_BOLD_LABEL_IN = re.compile(r"^\*\*(.{1,60}?):\*\*\s*(\S.*)$")
+_RE_PLAIN_LABEL = re.compile(r"^([A-Za-z0-9][^:|*#\n]{0,38}?)\s*:\s+(\S.*)$")
+
+
+def _kv_match(s: str):
+    """Mengenali baris berpola 'Label : isi'. Baris berurutan seperti ini dirender sebagai blok
+    3 kolom (label | : | isi) supaya tanda titik dua SEJAJAR. Mengembalikan (label, isi) / None."""
+    s = s.strip()
+    if not s or s.startswith(("#", "|")):
+        return None
+    num, prefixed = None, False
+    m = re.match(r"^(\d+)[.)]\s+(.*)$", s)
+    if m:
+        num, s, prefixed = m.group(1), m.group(2), True
+    else:
+        m = re.match(r"^[-*\u2022]\s+(.*)$", s)
+        if m:
+            s, prefixed = m.group(1), True
+    label = value = None
+    for rx in (_RE_BOLD_LABEL, _RE_BOLD_LABEL_IN):
+        m = rx.match(s)
+        if m:
+            label, value = m.group(1).strip(), m.group(2).strip()
+            break
+    if label is None:
+        if prefixed:          # poin bernomor/bullet biasa hanya dianggap 'label : isi' bila labelnya ditebalkan
+            return None
+        m = _RE_PLAIN_LABEL.match(s)
+        if not m:
+            return None
+        label, value = m.group(1).strip(), m.group(2).strip()
+        if len(label.split()) > 6 or re.search(r"[.,;!?]", label):
+            return None
+    label = label.replace("**", "").strip()
+    if num:
+        label = f"{num}. {label}"
+    return label, value
+
+
 def parse_markdown_blocks(md_text: str) -> list:
     """Mengubah teks markdown dari LLM menjadi daftar blok terstruktur:
-    ('h1'|'h2'|'h3', text) / ('bullet'|'numbered'|'para', text) / ('table', rows)"""
+    h1/h2/h3, bullet/bullet2, ('numbered', (no, teks, level)), para, ('kv', [(label, isi)...]),
+    ('table', rows)"""
     blocks = []
-    lines = md_text.replace("\r\n", "\n").split("\n")
+    lines = md_text.replace("\r\n", "\n").replace("\t", "    ").split("\n")
     i, n = 0, len(lines)
 
     while i < n:
-        line = lines[i].strip()
+        raw = lines[i]
+        line = raw.strip()
 
-        if not line:
+        if not line or re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", line):
             i += 1
             continue
 
         if line.startswith("|"):
             table_rows = []
             while i < n and lines[i].strip().startswith("|"):
-                row_line = lines[i].strip()
-                if not table_rows and i + 1 < n and re.match(r"^\|?[\s:\-|]+\|?$", lines[i + 1].strip()):
-                    i += 2
-                    table_rows.append([c.strip() for c in row_line.strip("|").split("|")])
-                    continue
-                table_rows.append([c.strip() for c in row_line.strip("|").split("|")])
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                is_sep = any(cells) and all(re.fullmatch(r":?-+:?", c) for c in cells if c)
+                if not is_sep:
+                    table_rows.append(cells)
                 i += 1
             if table_rows:
                 blocks.append(("table", table_rows))
             continue
 
-        if line.startswith("# "):
-            blocks.append(("h1", line[2:])); i += 1; continue
-        if line.startswith("## "):
-            blocks.append(("h2", line[3:])); i += 1; continue
+        if line.startswith("#### "):
+            blocks.append(("h3", line[5:])); i += 1; continue
         if line.startswith("### "):
             blocks.append(("h3", line[4:])); i += 1; continue
-        if re.match(r"^[-*]\s+", line):
-            blocks.append(("bullet", re.sub(r"^[-*]\s+", "", line))); i += 1; continue
-        if re.match(r"^\d+[.)]\s+", line):
-            blocks.append(("numbered", re.sub(r"^\d+[.)]\s+", "", line))); i += 1; continue
+        if line.startswith("## "):
+            blocks.append(("h2", line[3:])); i += 1; continue
+        if line.startswith("# "):
+            blocks.append(("h1", line[2:])); i += 1; continue
+
+        kv = _kv_match(line)
+        if kv:
+            items, j = [kv], i + 1
+            while j < n and lines[j].strip():
+                nxt = _kv_match(lines[j])
+                if not nxt:
+                    break
+                items.append(nxt)
+                j += 1
+            if len(items) >= 2:
+                blocks.append(("kv", items)); i = j; continue
+
+        indent = len(raw) - len(raw.lstrip(" "))
+        level = 2 if indent >= 2 else 1
+        m = re.match(r"^[-*\u2022]\s+(.*)$", line)
+        if m:
+            blocks.append(("bullet2" if level == 2 else "bullet", m.group(1))); i += 1; continue
+        m = re.match(r"^(\d+)[.)]\s+(.*)$", line)
+        if m:
+            blocks.append(("numbered", (m.group(1), m.group(2), level))); i += 1; continue
 
         blocks.append(("para", line)); i += 1
 
     return blocks
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\*+", "", text or "")
+
+
+def _esc(text: str) -> str:
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _hitung_lebar_kolom(rows: list, total_lebar: float, font_size: float, pad: float = 12.0) -> list:
+    """Lebar kolom tabel PROPORSIONAL dengan isinya (seperti auto-layout browser):
+    kolom pendek (No, JP, Skor) pas dengan isinya, kolom berisi teks panjang mendapat sisa ruang.
+    Semua satuan dalam point."""
+    ncols = max(len(r) for r in rows)
+    mins, maxs = [pad] * ncols, [pad] * ncols
+    for ridx, row in enumerate(rows):
+        fn = "Helvetica-Bold" if ridx == 0 else "Helvetica"
+        for c in range(ncols):
+            t = _plain(row[c]) if c < len(row) else ""
+            if not t.strip():
+                continue
+            full = stringWidth(t, fn, font_size) + pad
+            longest = max(stringWidth(w, fn, font_size) for w in t.split()) + pad
+            mins[c] = max(mins[c], longest)
+            maxs[c] = max(maxs[c], full)
+    maxs = [max(a, b) for a, b in zip(mins, maxs)]
+    if sum(maxs) <= total_lebar:
+        faktor = total_lebar / sum(maxs)
+        return [w * faktor for w in maxs]
+    if sum(mins) >= total_lebar:
+        faktor = total_lebar / sum(mins)
+        return [w * faktor for w in mins]
+    sisa = total_lebar - sum(mins)
+    ekstra = [mx - mn for mx, mn in zip(maxs, mins)]
+    tot_ekstra = sum(ekstra) or 1
+    return [mn + sisa * e / tot_ekstra for mn, e in zip(mins, ekstra)]
+
+
+def _ukuran_font_tabel(ncols: int, docx: bool = False) -> float:
+    ukuran = 9.3 if ncols <= 5 else 8.5 if ncols <= 7 else 7.5 if ncols <= 10 else 6.5
+    return ukuran + (0.2 if docx else 0)
+
+
+def _kolom_tengah(rows: list) -> list:
+    """Kolom yang isinya pendek semua (No, JP, Skor, Kode) diratakan tengah."""
+    ncols = max(len(r) for r in rows)
+    if len(rows) < 2:
+        return [False] * ncols
+    return [all(len(_plain(r[c] if c < len(r) else "").strip()) <= 7 for r in rows[1:]) for c in range(ncols)]
 
 
 # ---------- Rendering ke PDF (reportlab) ----------
@@ -1280,6 +1446,9 @@ def _inline_format_pdf(text: str) -> str:
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*(?!\*)(.+?)\*(?!\*)", r"<i>\1</i>", text)
     return text
+
+
+PDF_LEBAR_ISI = 17 * cm   # A4 21cm - margin kiri/kanan 2cm + 2cm
 
 
 def build_pdf_styles():
@@ -1294,12 +1463,29 @@ def build_pdf_styles():
         "body": ParagraphStyle("Body", parent=base["Normal"], fontSize=10.3,
                                 leading=15, alignment=TA_JUSTIFY, spaceAfter=5),
         "bullet": ParagraphStyle("Bullet", parent=base["Normal"], fontSize=10.3,
-                                  leading=14, leftIndent=14, spaceAfter=3, alignment=TA_JUSTIFY),
-        "cell": ParagraphStyle("Cell", parent=base["Normal"], fontSize=9.3, leading=12),
-        "meta_label": ParagraphStyle("MetaLabel", parent=base["Normal"], fontSize=9.5,
-                                      textColor=colors.HexColor("#555555"), alignment=TA_RIGHT),
-        "meta_value": ParagraphStyle("MetaValue", parent=base["Normal"], fontSize=10,
-                                      fontName="Helvetica-Bold"),
+                                  leading=14, leftIndent=18, bulletIndent=6, spaceAfter=3,
+                                  alignment=TA_LEFT),
+        "bullet2": ParagraphStyle("Bullet2", parent=base["Normal"], fontSize=10,
+                                   leading=13.5, leftIndent=34, bulletIndent=22, spaceAfter=2,
+                                   alignment=TA_LEFT),
+        "numbered": ParagraphStyle("Numbered", parent=base["Normal"], fontSize=10.3,
+                                    leading=14, leftIndent=20, bulletIndent=0, spaceAfter=3,
+                                    alignment=TA_LEFT),
+        "numbered2": ParagraphStyle("Numbered2", parent=base["Normal"], fontSize=10,
+                                     leading=13.5, leftIndent=38, bulletIndent=18, spaceAfter=2,
+                                     alignment=TA_LEFT),
+        "kv_label": ParagraphStyle("KVLabel", parent=base["Normal"], fontName="Helvetica-Bold",
+                                    fontSize=10.3, leading=14, alignment=TA_LEFT),
+        "kv_colon": ParagraphStyle("KVColon", parent=base["Normal"], fontSize=10.3, leading=14,
+                                    alignment=TA_CENTER),
+        "kv_value": ParagraphStyle("KVValue", parent=base["Normal"], fontSize=10.3, leading=14,
+                                    alignment=TA_LEFT),
+        "meta_label": ParagraphStyle("MetaLabel", parent=base["Normal"], fontName="Helvetica-Bold",
+                                      fontSize=9.8, leading=13, alignment=TA_LEFT),
+        "meta_colon": ParagraphStyle("MetaColon", parent=base["Normal"], fontSize=9.8, leading=13,
+                                      alignment=TA_CENTER),
+        "meta_value": ParagraphStyle("MetaValue", parent=base["Normal"], fontSize=9.8, leading=13,
+                                      alignment=TA_LEFT),
         "title": ParagraphStyle("DocTitle", parent=base["Heading1"], fontSize=18,
                                  alignment=TA_CENTER, textColor=COLOR_PRIMARY, spaceAfter=2),
         "subtitle": ParagraphStyle("DocSubtitle", parent=base["Normal"], fontSize=10.5,
@@ -1308,24 +1494,70 @@ def build_pdf_styles():
     }
 
 
+def _kv_table_pdf(items: list, styles: dict, kunci_label: str, kunci_colon: str, kunci_value: str,
+                  font_size: float, total: float, bg=None, box=False):
+    label_w = max(stringWidth(_plain(l), "Helvetica-Bold", font_size) for l, _ in items) + 16
+    label_w = min(max(label_w, 2.2 * cm), 0.42 * total)
+    colon_w = 0.45 * cm
+    data = [[Paragraph(_esc(_plain(l)), styles[kunci_label]),
+             Paragraph(":", styles[kunci_colon]),
+             Paragraph(_inline_format_pdf(v), styles[kunci_value])] for l, v in items]
+    tbl = Table(data, colWidths=[label_w, colon_w, total - label_w - colon_w], hAlign="LEFT")
+    perintah = [
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
+    ]
+    if bg is not None:
+        perintah.append(("BACKGROUND", (0, 0), (-1, -1), bg))
+    if box:
+        perintah.append(("BOX", (0, 0), (-1, -1), 0.7, COLOR_PRIMARY))
+        perintah[1] = ("LEFTPADDING", (0, 0), (-1, -1), 8)
+    tbl.setStyle(TableStyle(perintah))
+    return tbl
+
+
+def _tabel_pdf(rows: list, total: float):
+    ncols = max(len(r) for r in rows)
+    rows = [list(r) + [""] * (ncols - len(r)) for r in rows]
+    fs = _ukuran_font_tabel(ncols)
+    widths = _hitung_lebar_kolom(rows, total, fs)
+    tengah = _kolom_tengah(rows)
+    base = getSampleStyleSheet()["Normal"]
+    head = ParagraphStyle("TblHead", parent=base, fontName="Helvetica-Bold", fontSize=fs,
+                           leading=fs * 1.3, textColor=colors.white, alignment=TA_CENTER)
+    body_l = ParagraphStyle("TblBodyL", parent=base, fontSize=fs, leading=fs * 1.3, alignment=TA_LEFT)
+    body_c = ParagraphStyle("TblBodyC", parent=base, fontSize=fs, leading=fs * 1.3, alignment=TA_CENTER)
+    data = []
+    for ridx, row in enumerate(rows):
+        if ridx == 0:
+            data.append([Paragraph(_inline_format_pdf(_plain(c)), head) for c in row])
+        else:
+            data.append([Paragraph(_inline_format_pdf(c), body_c if tengah[ci] else body_l)
+                         for ci, c in enumerate(row)])
+    tbl = Table(data, colWidths=widths, repeatRows=1, hAlign="CENTER")
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARY),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#8FA3BF")),
+        ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+        ("VALIGN", (0, 1), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_LIGHT]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return tbl
+
+
 def blocks_to_pdf_flowables(blocks: list, styles: dict) -> list:
     flowables = []
     for kind, content in blocks:
         if kind == "table":
-            para_rows = [[Paragraph(_inline_format_pdf(c), styles["cell"]) for c in row] for row in content]
-            tbl = Table(para_rows, repeatRows=1, hAlign="LEFT")
-            tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARY),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.6, colors.grey),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_LIGHT]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]))
-            flowables.append(tbl)
+            flowables.append(_tabel_pdf(content, PDF_LEBAR_ISI))
             flowables.append(Spacer(1, 10))
+        elif kind == "kv":
+            flowables.append(_kv_table_pdf(content, styles, "kv_label", "kv_colon", "kv_value",
+                                           10.3, PDF_LEBAR_ISI))
+            flowables.append(Spacer(1, 6))
         elif kind == "h1":
             flowables.append(Spacer(1, 6))
             flowables.append(Paragraph(_inline_format_pdf(content), styles["h1"]))
@@ -1337,9 +1569,14 @@ def blocks_to_pdf_flowables(blocks: list, styles: dict) -> list:
             flowables.append(Spacer(1, 4))
             flowables.append(Paragraph(_inline_format_pdf(content), styles["h3"]))
         elif kind == "bullet":
-            flowables.append(Paragraph("• " + _inline_format_pdf(content), styles["bullet"]))
+            flowables.append(Paragraph(_inline_format_pdf(content), styles["bullet"], bulletText="\u2022"))
+        elif kind == "bullet2":
+            flowables.append(Paragraph(_inline_format_pdf(content), styles["bullet2"], bulletText="\u2013"))
         elif kind == "numbered":
-            flowables.append(Paragraph(_inline_format_pdf(content), styles["bullet"]))
+            no, teks, level = content
+            flowables.append(Paragraph(_inline_format_pdf(teks),
+                                       styles["numbered2" if level == 2 else "numbered"],
+                                       bulletText=f"{no}."))
         else:
             flowables.append(Paragraph(_inline_format_pdf(content), styles["body"]))
     return flowables
@@ -1380,34 +1617,16 @@ def generate_pdf(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: b
     )
     styles = build_pdf_styles()
     story = [
-        Paragraph(doc_title, styles["title"]),
+        Paragraph(_esc(doc_title), styles["title"]),
         Paragraph("Kurikulum Merdeka &bull; Pembelajaran Mendalam (Deep Learning)", styles["subtitle"]),
     ]
 
-    rows = _meta_pairs(meta)
-    if rows:
-        table_data = []
-        for pair in rows:
-            row = []
-            for k, v in pair:
-                row.append(Paragraph(f"<b>{k}</b>", styles["meta_label"]))
-                row.append(Paragraph(f": {v}", styles["meta_value"]))
-            if len(pair) == 1:
-                row += ["", ""]
-            table_data.append(row)
-        # Label rata-kanan pada kolom lebar tetap -> tanda titik dua otomatis lurus,
-        # tanpa perlu kolom sempit terpisah (yang rawan error karena lebih kecil dari padding sel).
-        # Total HARUS <= lebar halaman - margin kiri/kanan (A4 21cm - 2cm - 2cm = 17cm).
-        meta_table = Table(table_data, colWidths=[3.4 * cm, 5.4 * cm, 3.0 * cm, 5.0 * cm])
-        meta_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), COLOR_LIGHT),
-            ("BOX", (0, 0), (-1, -1), 0.7, COLOR_PRIMARY),
-            ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.white),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ]))
-        story.append(meta_table)
+    meta_items = [(k, str(v)) for k, v in meta.items() if v]
+    if meta_items:
+        # Label | titik dua | isi -> tanda ":" selalu sejajar lurus di semua baris.
+        story.append(_kv_table_pdf(meta_items, styles,
+                                   "meta_label", "meta_colon", "meta_value", 9.8, PDF_LEBAR_ISI,
+                                   bg=COLOR_LIGHT, box=True))
         story.append(Spacer(1, 12))
 
     if gambar_bytes:
@@ -1441,6 +1660,87 @@ def _add_formatted_runs_docx(paragraph, text: str):
             paragraph.add_run(tok)
 
 
+def _docx_shade(cell, hex_color: str):
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear"); shd.set(qn("w:color"), "auto"); shd.set(qn("w:fill"), hex_color)
+    tcPr.append(shd)
+
+
+def _docx_tetapkan_lebar(tbl, lebar_pt: list):
+    """Kunci tata letak tabel (fixed) + lebar tiap kolom, supaya Word tidak mengubah proporsi."""
+    tbl.autofit = False
+    tblPr = tbl._tbl.tblPr
+    layout = OxmlElement("w:tblLayout"); layout.set(qn("w:type"), "fixed")
+    tblPr.append(layout)
+    for idx, w in enumerate(lebar_pt):
+        tbl.columns[idx].width = Pt(w)
+        for cell in tbl.columns[idx].cells:
+            cell.width = Pt(w)
+
+
+def _docx_tabel_kv(document, items: list, font_pt: float, shade: str = None, label_bold=True):
+    total_pt = 17 * 28.3465
+    label_w = max(stringWidth(_plain(l), "Helvetica-Bold", font_pt) for l, _ in items) * 1.05 + 20
+    label_w = min(max(label_w, 2.2 * 28.3465), 0.42 * total_pt)
+    colon_w = 0.45 * 28.3465
+    tbl = document.add_table(rows=0, cols=3)
+    for label, value in items:
+        cells = tbl.add_row().cells
+        p0 = cells[0].paragraphs[0]
+        r0 = p0.add_run(_plain(label)); r0.bold = label_bold; r0.font.size = Pt(font_pt)
+        p1 = cells[1].paragraphs[0]; p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r1 = p1.add_run(":"); r1.font.size = Pt(font_pt)
+        p2 = cells[2].paragraphs[0]
+        _add_formatted_runs_docx(p2, value)
+        for r in p2.runs:
+            r.font.size = Pt(font_pt)
+        for p in (p0, p1, p2):
+            p.paragraph_format.space_after = Pt(2)
+            p.paragraph_format.space_before = Pt(0)
+        if shade:
+            for c in cells:
+                _docx_shade(c, shade)
+    _docx_tetapkan_lebar(tbl, [label_w, colon_w, total_pt - label_w - colon_w])
+    return tbl
+
+
+def _docx_tabel_data(document, rows: list):
+    ncols = max(len(r) for r in rows)
+    rows = [list(r) + [""] * (ncols - len(r)) for r in rows]
+    fs = _ukuran_font_tabel(ncols, docx=True)
+    lebar = _hitung_lebar_kolom(rows, 17 * 28.3465, fs * 0.93)
+    tengah = _kolom_tengah(rows)
+    tbl = document.add_table(rows=0, cols=ncols)
+    tbl.style = "Table Grid"
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for ridx, row in enumerate(rows):
+        cells = tbl.add_row().cells
+        for cidx in range(ncols):
+            cell = cells[cidx]
+            cell.text = ""
+            p = cell.paragraphs[0]
+            p.paragraph_format.space_after = Pt(0)
+            p.paragraph_format.space_before = Pt(0)
+            if ridx == 0:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = p.add_run(_plain(row[cidx]))
+                run.bold = True; run.font.size = Pt(fs); run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                _docx_shade(cell, "1E4D8C")
+                cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            else:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER if tengah[cidx] else WD_ALIGN_PARAGRAPH.LEFT
+                _add_formatted_runs_docx(p, row[cidx])
+                for r in p.runs:
+                    r.font.size = Pt(fs)
+                if ridx % 2 == 0:
+                    _docx_shade(cell, "EEF3FA")
+    trPr = tbl.rows[0]._tr.get_or_add_trPr()
+    hdr = OxmlElement("w:tblHeader"); hdr.set(qn("w:val"), "true"); trPr.append(hdr)
+    _docx_tetapkan_lebar(tbl, lebar)
+    return tbl
+
+
 def generate_docx(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: bytes = None) -> bytes:
     document = Document()
 
@@ -1466,30 +1766,10 @@ def generate_docx(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: 
     r_sub.font.size = Pt(10)
     r_sub.font.color.rgb = DOCX_GREY_RGB
 
-    rows = _meta_pairs(meta)
-    if rows:
-        table = document.add_table(rows=0, cols=4)
-        table.style = "Light Grid Accent 1"
-        table.autofit = False
-        table.allow_autofit = False
-        # Label rata-kanan pada kolom lebar tetap -> titik dua otomatis lurus di setiap baris.
-        # Total <= lebar halaman - margin kiri/kanan (21cm - 2cm - 2cm = 17cm)
-        lebar_kolom = [Cm(3.4), Cm(5.4), Cm(3.0), Cm(5.0)]
-        for pair in rows:
-            cells = table.add_row().cells
-            for c, w in zip(cells, lebar_kolom):
-                c.width = w
-            idx = 0
-            for k, v in pair:
-                cells[idx].text = ""
-                run = cells[idx].paragraphs[0].add_run(k)
-                run.bold = True
-                cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                cells[idx + 1].text = f": {v}"
-                idx += 2
-            if len(pair) == 1:
-                for extra_idx in range(2, 4):
-                    cells[extra_idx].text = ""
+    meta_items = [(k, str(v)) for k, v in meta.items() if v]
+    if meta_items:
+        # Label | titik dua | isi dengan lebar kolom tetap -> titik dua lurus di setiap baris.
+        _docx_tabel_kv(document, meta_items, 10, shade="EEF3FA")
         document.add_paragraph("")
 
     if gambar_bytes:
@@ -1516,22 +1796,24 @@ def generate_docx(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: 
         elif kind == "bullet":
             p = document.add_paragraph(style="List Bullet")
             _add_formatted_runs_docx(p, content)
-        elif kind == "numbered":
-            p = document.add_paragraph(style="List Number")
+        elif kind == "bullet2":
+            p = document.add_paragraph(style="List Bullet 2")
             _add_formatted_runs_docx(p, content)
+        elif kind == "numbered":
+            no, teks, level = content
+            p = document.add_paragraph()
+            kiri = 1.5 if level == 2 else 0.75
+            p.paragraph_format.left_indent = Cm(kiri)
+            p.paragraph_format.first_line_indent = Cm(-0.75)
+            p.paragraph_format.tab_stops.add_tab_stop(Cm(kiri))
+            p.paragraph_format.space_after = Pt(3)
+            p.add_run(f"{no}.\t")
+            _add_formatted_runs_docx(p, teks)
+        elif kind == "kv":
+            _docx_tabel_kv(document, content, 10.5)
+            document.add_paragraph("")
         elif kind == "table":
-            ncols = max(len(r) for r in content)
-            tbl = document.add_table(rows=0, cols=ncols)
-            tbl.style = "Light Grid Accent 1"
-            for ridx, row in enumerate(content):
-                cells = tbl.add_row().cells
-                for cidx in range(ncols):
-                    text = row[cidx] if cidx < len(row) else ""
-                    cells[cidx].text = ""
-                    _add_formatted_runs_docx(cells[cidx].paragraphs[0], text)
-                    if ridx == 0:
-                        for run in cells[cidx].paragraphs[0].runs:
-                            run.bold = True
+            _docx_tabel_data(document, content)
             document.add_paragraph("")
         else:
             p = document.add_paragraph()
@@ -1541,6 +1823,44 @@ def generate_docx(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: 
     document.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+# ---------- Tampilan di layar (pratinjau) ----------
+def _html_inline(text: str) -> str:
+    t = html.escape(text or "")
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"(?<!\*)\*(?!\*)(.+?)\*(?!\*)", r"<i>\1</i>", t)
+    return t
+
+
+def tampilkan_hasil(md_text: str):
+    """Pratinjau hasil di layar. Baris 'Label : isi' berurutan ditampilkan sebagai tabel
+    3 kolom tanpa garis sehingga titik duanya sejajar, sama seperti di PDF/Word."""
+    lines = (md_text or "").replace("\r\n", "\n").split("\n")
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        kv = _kv_match(lines[i])
+        if kv:
+            items, j = [kv], i + 1
+            while j < n and lines[j].strip():
+                nxt = _kv_match(lines[j])
+                if not nxt:
+                    break
+                items.append(nxt); j += 1
+            if len(items) >= 2:
+                baris = ""
+                for l, v in items:
+                    gaya = " style='white-space:normal'" if len(l) > 40 else ""
+                    baris += (f"<tr><td class='k'{gaya}>{html.escape(l)}</td>"
+                              f"<td class='c'>:</td><td>{_html_inline(v)}</td></tr>")
+                out.append("")
+                out.append(f"<table class='kv-tbl'>{baris}</table>")
+                out.append("")
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    st.markdown("\n".join(out), unsafe_allow_html=True)
 
 
 def download_row(base_filename: str, pdf_bytes: bytes, docx_bytes: bytes, key_prefix: str):
@@ -1646,6 +1966,7 @@ Anda adalah Pakar Pengembang Kurikulum Merdeka dan Pengawas Sekolah Senior di In
 Susun TUJUAN PEMBELAJARAN (TP) dan ALUR TUJUAN PEMBELAJARAN (ATP) yang siap pakai.
 
 {DEEP_LEARNING_GUIDE}
+{profil_lulusan_guide()}
 
 DATA INPUT:
 - Satuan Pendidikan: {st.session_state.sekolah}
@@ -1675,8 +1996,16 @@ disusun terukur dan operasional (gunakan kata kerja operasional Taksonomi Bloom 
 Sajikan dalam bentuk TABEL markdown dengan kolom:
 | No | Kode TP | Tujuan Pembelajaran | Alokasi Waktu (JP) | Dimensi Profil Lulusan Terkait | Prinsip Deep Learning (Mindful/Meaningful/Joyful) |
 Urutkan dari kompetensi prasyarat termudah menuju paling kompleks (logis & berjenjang).
+Kolom "Dimensi Profil Lulusan Terkait" diisi 1-3 dimensi dari 8 dimensi resmi (tulis nama resminya).
+Isi sel ringkas agar tabel proporsional dan mudah dibaca; kolom No/Kode TP/JP cukup singkat.
 
-## E. CATATAN PENGEMBANGAN
+## E. PEMETAAN 8 DIMENSI PROFIL LULUSAN
+Sajikan dalam TABEL markdown dengan kolom:
+| No | Dimensi Profil Lulusan | TP Terkait | Bentuk Penguatan dalam Alur Pembelajaran |
+Isi SATU baris untuk SETIAP dari 8 dimensi (urut sesuai pedoman). Pastikan tiap dimensi terkait
+minimal dengan satu TP, dan jelaskan bentuk penguatannya secara konkret.
+
+## F. CATATAN PENGEMBANGAN
 Berikan catatan singkat strategi asesmen dan diferensiasi yang disarankan sepanjang alur ini.
 
 Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
@@ -1699,7 +2028,7 @@ Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
                 st.error(f"❌ Terjadi kesalahan API Groq: {e}")
 
     if st.session_state.hasil_tp_atp:
-        st.markdown(st.session_state.hasil_tp_atp)
+        tampilkan_hasil(st.session_state.hasil_tp_atp)
         pdf_bytes = generate_pdf("TUJUAN PEMBELAJARAN & ALUR TUJUAN PEMBELAJARAN",
                                   st.session_state.meta_tp_atp, st.session_state.hasil_tp_atp)
         docx_bytes = generate_docx("TUJUAN PEMBELAJARAN & ALUR TUJUAN PEMBELAJARAN",
@@ -1723,6 +2052,15 @@ with tab_modul:
             height=90, key="m_tp_acuan",
         )
 
+    m_profil = st.multiselect(
+        "🎓 Fokus Dimensi Profil Lulusan (8 dimensi, bisa dikurangi sesuai kebutuhan)",
+        PROFIL_NAMA, default=PROFIL_NAMA, key="m_profil",
+        help="Dimensi yang dipilih akan dipetakan ke kegiatan pembelajaran, asesmen, dan refleksi murid.",
+    )
+    with st.expander("ℹ️ Lihat penjelasan 8 Dimensi Profil Lulusan"):
+        for _n, _d in PROFIL_LULUSAN:
+            st.markdown(f"**{_n}** — {_d}")
+
     m_referensi = uploader_referensi("m_referensi_upl")
 
     if st.button("🚀 Buat Modul Ajar Sekarang", key="btn_modul"):
@@ -1733,11 +2071,13 @@ with tab_modul:
         else:
             try:
                 with st.spinner("Groq AI sedang menyusun Modul Ajar presisi... Mohon tunggu..."):
+                    profil_fokus_txt = ", ".join(m_profil or PROFIL_NAMA)
                     prompt = f"""
 Anda adalah Pakar Pengembang Kurikulum Merdeka dan Pengawas Sekolah Senior di Indonesia.
 Tugas Anda adalah membuatkan MODUL AJAR LENGKAP & SIAP PAKAI sesuai format resmi Kemendikbudristek.
 
 {DEEP_LEARNING_GUIDE}
+{profil_lulusan_guide(m_profil)}
 
 DATA INPUT:
 - Satuan Pendidikan: {st.session_state.sekolah}
@@ -1749,36 +2089,79 @@ DATA INPUT:
 - Tujuan Pembelajaran acuan (jika ada): {m_tp_acuan or 'Rumuskan sendiri berdasarkan topik.'}
 {f"- REFERENSI TAMBAHAN dari Buku Guru/materi yang diunggah (jadikan acuan isi & istilah bila relevan): {m_referensi}" if m_referensi else ""}
 
-PETUNJUK FORMAT OUTPUT (Wajib Rapi dengan Markdown):
+PETUNJUK FORMAT OUTPUT (Wajib Rapi dengan Markdown, ikuti persis pola penulisan berikut):
+
+ATURAN PENULISAN AGAR HASIL CETAK RAPI:
+- Data berpasangan (identitas, informasi umum, model pembelajaran) ditulis SATU BARIS per data dengan
+  pola **Label** : isi  (label tebal, spasi, titik dua, spasi, isi). JANGAN diberi nomor atau bullet
+  di depannya dan tulis berurutan tanpa baris kosong, agar tanda titik dua tampil SEJAJAR.
+- Tabel markdown: judul kolom singkat, isi sel ringkas (maksimal 1-2 kalimat), tidak ada sel kosong.
+  Kolom No/Skor/JP diisi singkat. Jangan membuat tabel untuk satu baris data saja.
 
 # MODUL AJAR KURIKULUM MERDEKA
 
 ## A. INFORMASI UMUM
-1. **Identitas Modul**: Nama Penyusun, Sekolah, Jenjang SD, Mata Pelajaran, Alokasi Waktu.
-2. **Kompetensi Awal**: Pengetahuan dasar yang harus dimiliki murid sebelum materi ini.
-3. **Profil Lulusan / Profil Pelajar Pancasila**: Sebutkan dimensi yang relevan.
-4. **Sarana & Prasarana**: Alat dan bahan yang dibutuhkan.
-5. **Target Peserta Didik**: Reguler / Tipikal.
-6. **Model Pembelajaran**: Tatap Muka / Problem Based Learning / Diferensiasi (sesuaikan Deep Learning).
+### 1. Identitas Modul
+**Nama Penyusun** : {st.session_state.penyusun or '(diisi oleh guru)'}
+**Satuan Pendidikan** : {st.session_state.sekolah}
+**Jenjang / Kelas / Fase** : SD / {label_kelas_fase(m_kelas)}
+**Mata Pelajaran** : {m_mapel}
+**Topik** : {m_topik}
+**Alokasi Waktu** : {m_alokasi}
+### 2. Kompetensi Awal
+Pengetahuan/keterampilan dasar yang harus dimiliki murid sebelum materi ini (2-4 poin singkat).
+### 3. Profil Lulusan (Dimensi Fokus)
+Sajikan dalam TABEL markdown dengan kolom:
+| No | Dimensi Profil Lulusan | Wujud Penguatan pada Pembelajaran Ini (indikator perilaku yang dapat diamati) |
+Isi SATU baris untuk SETIAP dimensi fokus berikut (tulis nama resminya persis): {profil_fokus_txt}.
+### 4. Sarana & Prasarana
+Alat dan bahan yang dibutuhkan (bullet).
+### 5. Target Peserta Didik
+Reguler / Tipikal, serta catatan diferensiasi singkat.
+### 6. Model Pembelajaran
+**Model** : (misal Problem Based Learning / Project Based Learning)
+**Pendekatan** : Pembelajaran Mendalam (Mindful, Meaningful, Joyful)
+**Metode** : (sebutkan)
 
 ## B. KOMPONEN INTI
-1. **Tujuan Pembelajaran (TP)**: Jabarkan secara rinci dan terukur.
-2. **Pemahaman Bermakna**: Manfaat materi dalam kehidupan sehari-hari murid.
-3. **Pertanyaan Pemantik**: 2-3 pertanyaan pemicu diskusi di awal kelas.
-4. **Kegiatan Pembelajaran**:
-   - **Pendahuluan (10 Menit)**: Orientasi, Apersepsi, Motivasi. Beri label prinsip Deep Learning.
-   - **Kegiatan Inti (50 Menit)**: Langkah konkret pembelajaran diferensiasi/aktif, SETIAP langkah
-     diberi label (Mindful)/(Meaningful)/(Joyful) sesuai pedoman di atas.
-   - **Penutup (10 Menit)**: Evaluasi, Refleksi (Mindful), Rencana Pertemuan Berikutnya.
-5. **Asesmen**: Asesmen Formatif lengkap dengan Rubrik Penilaian dalam TABEL markdown (Skor 1-4).
+### 1. Tujuan Pembelajaran (TP)
+Jabarkan secara rinci dan terukur (bullet).
+### 2. Pemahaman Bermakna
+Manfaat materi dalam kehidupan sehari-hari murid.
+### 3. Pertanyaan Pemantik
+2-3 pertanyaan pemicu diskusi di awal kelas.
+### 4. Kegiatan Pembelajaran
+#### Pendahuluan (10 Menit)
+Langkah bernomor 1., 2., 3. (orientasi, apersepsi, motivasi), tiap langkah diberi label prinsip Deep Learning.
+#### Kegiatan Inti (50 Menit)
+Sajikan dalam TABEL markdown dengan kolom:
+| No | Langkah Kegiatan Murid & Guru | Prinsip Deep Learning | Dimensi Profil Lulusan |
+SETIAP langkah diberi prinsip (Mindful/Meaningful/Joyful) dan 1-2 dimensi profil lulusan yang diperkuat.
+Seluruh dimensi fokus harus muncul minimal satu kali pada rangkaian langkah ini.
+#### Penutup (10 Menit)
+Langkah bernomor: evaluasi, refleksi (Mindful) termasuk refleksi dimensi profil lulusan, dan rencana pertemuan berikutnya.
+### 5. Asesmen
+#### Asesmen Formatif
+**Teknik** : (observasi / unjuk kerja / tes tertulis, dst.)
+**Instrumen** : (lembar observasi / rubrik / soal)
+#### Rubrik Penilaian Capaian Tujuan
+TABEL markdown skor 1-4 dengan kolom: | Aspek yang Dinilai | Skor 4 | Skor 3 | Skor 2 | Skor 1 |
+#### Asesmen Profil Lulusan
+TABEL markdown dengan kolom: | Dimensi Profil Lulusan | Indikator yang Diamati | Teknik / Instrumen |
+Isi satu baris untuk setiap dimensi fokus.
 
 ## C. LAMPIRAN
-1. **Lembar Kerja Peserta Didik (LKPD) ringkas**: Buatkan soal/tugas interaktif siap cetak.
-2. **Bahan Bacaan Guru & Murid**: Ringkasan materi singkat.
+### 1. Lembar Kerja Peserta Didik (LKPD) ringkas
+Buatkan soal/tugas interaktif siap cetak.
+### 2. Bahan Bacaan Guru & Murid
+Ringkasan materi singkat.
+### 3. Lembar Refleksi Murid (Profil Lulusan)
+TABEL markdown dengan kolom: | No | Pernyataan Refleksi (bahasa anak SD) | Ya | Belum |
+Buat satu pernyataan per dimensi fokus; kolom Ya/Belum diisi tanda [  ].
 
 Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
 """
-                    hasil = call_groq(groq_api_key, prompt)
+                    hasil = call_groq(groq_api_key, prompt, max_tokens=7500)
                     st.session_state.hasil_modul = hasil
                     st.session_state.meta_modul = {
                         "Satuan Pendidikan": st.session_state.sekolah,
@@ -1796,7 +2179,7 @@ Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
                 st.error(f"❌ Terjadi kesalahan API Groq: {e}")
 
     if st.session_state.hasil_modul:
-        st.markdown(st.session_state.hasil_modul)
+        tampilkan_hasil(st.session_state.hasil_modul)
         pdf_bytes = generate_pdf("MODUL AJAR KURIKULUM MERDEKA",
                                   st.session_state.meta_modul, st.session_state.hasil_modul)
         docx_bytes = generate_docx("MODUL AJAR KURIKULUM MERDEKA",
@@ -1857,6 +2240,9 @@ Anda adalah Pakar Pengembang Kurikulum Merdeka di Indonesia.
 Susun LEMBAR KERJA PESERTA DIDIK (LKPD) yang siap dicetak untuk murid Sekolah Dasar.
 
 {DEEP_LEARNING_GUIDE}
+{profil_lulusan_guide()}
+Khusus LKPD: pilih 2-3 dimensi yang PALING relevan dengan topik, lalu wujudkan dalam kegiatan/soal
+(misal Kolaborasi lewat tugas berpasangan, Penalaran Kritis lewat soal "mengapa"), bukan sekadar disebut.
 
 DATA INPUT:
 - Satuan Pendidikan: {st.session_state.sekolah}
@@ -1901,7 +2287,11 @@ Instruksi singkat, jelas, ramah anak, sisipkan kalimat pemantik semangat (Joyful
 Nomori setiap soal, sesuai jenis soal yang diminta, tingkat kesulitan {l_tingkat}, sediakan
 ruang jawaban (garis titik-titik) untuk isian/uraian. Untuk pilihan ganda beri opsi A-D.
 
-## F. KUNCI JAWABAN & PEDOMAN PENSKORAN
+## F. REFLEKSIKU (PROFIL LULUSAN)
+Tabel markdown: | No | Pernyataan (bahasa anak SD) | Ya | Belum |
+Buat 3 pernyataan yang mewakili dimensi profil lulusan terpilih; kolom Ya/Belum diisi tanda [  ].
+
+## G. KUNCI JAWABAN & PEDOMAN PENSKORAN
 Pisahkan bagian ini dengan jelas (halaman guru), sertakan tabel skor per nomor.
 
 Gunakan Bahasa Indonesia yang komunikatif dan ramah anak sesuai jenjang {label_kelas_fase(l_kelas)}.
@@ -1922,7 +2312,7 @@ Gunakan Bahasa Indonesia yang komunikatif dan ramah anak sesuai jenjang {label_k
                 st.error(f"❌ Terjadi kesalahan API Groq: {e}")
 
     if st.session_state.hasil_lkpd:
-        st.markdown(st.session_state.hasil_lkpd)
+        tampilkan_hasil(st.session_state.hasil_lkpd)
         if st.session_state.lkpd_gambar_bytes:
             st.image(st.session_state.lkpd_gambar_bytes, caption="Gambar Ilustrasi Stimulus Soal", width=300)
         pdf_bytes = generate_pdf("LEMBAR KERJA PESERTA DIDIK (LKPD)",
@@ -2062,7 +2452,7 @@ Gunakan Bahasa Indonesia resmi dan terstruktur rapi.
                 st.error(f"❌ Terjadi kesalahan API Groq: {e}")
 
     if st.session_state.hasil_prota_promes:
-        st.markdown(st.session_state.hasil_prota_promes)
+        tampilkan_hasil(st.session_state.hasil_prota_promes)
         pdf_bytes = generate_pdf(st.session_state.judul_prota_promes,
                                   st.session_state.meta_prota_promes, st.session_state.hasil_prota_promes)
         docx_bytes = generate_docx(st.session_state.judul_prota_promes,
@@ -2227,7 +2617,7 @@ with tab_minggu:
         colm1.metric("Total Minggu", total_)
         colm2.metric("Minggu Efektif", efektif_)
         colm3.metric("Minggu Tidak Efektif", total_ - efektif_)
-        st.markdown(st.session_state.hasil_minggu_efektif)
+        tampilkan_hasil(st.session_state.hasil_minggu_efektif)
         pdf_bytes = generate_pdf(f"ANALISIS MINGGU EFEKTIF - SEMESTER {me_semester.upper()}",
                                   st.session_state.meta_minggu_efektif, st.session_state.hasil_minggu_efektif)
         docx_bytes = generate_docx(f"ANALISIS MINGGU EFEKTIF - SEMESTER {me_semester.upper()}",
