@@ -202,6 +202,7 @@ defaults = {
     "hasil_minggu_efektif": "", "meta_minggu_efektif": {}, "tabel_minggu_efektif": None,
     "jurnal_rows": [],
     "siswa_rows": [],
+    "gas_url": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -216,6 +217,8 @@ if "groq_key_loaded" not in st.session_state:
     st.session_state.groq_key_loaded = False
 if "groq_key_ganti" not in st.session_state:
     st.session_state.groq_key_ganti = False
+if "gas_loaded" not in st.session_state:
+    st.session_state.gas_loaded = False
 
 
 # ============================================================
@@ -470,6 +473,201 @@ def kunci_api_simpan(kunci: str):
         return False, f"Tidak bisa menulis file penyimpanan: {e}"
 
 
+# ---------- Google Sheet via Apps Script (tersimpan di akun Google guru masing-masing) ----------
+# Setiap guru memasang Apps Script di Google Sheet MILIKNYA sendiri lalu menempel URL Web App
+# di sidebar. URL disimpan per akun (mode login) atau di file .gas_url (mode tanpa login).
+FILE_GAS_URL = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".gas_url")
+
+GAS_KODE_APPS_SCRIPT = r'''// Apps Script untuk Generator Perangkat Ajar KKG
+// Tempel di: Google Sheet > Ekstensi > Apps Script. Lalu Deploy > Web App.
+
+var KOLOM_JURNAL = ["Tanggal", "Kelas", "Mapel", "JP", "Materi", "Kegiatan", "Hadir", "Catatan"];
+var KOLOM_JP = ["Kunci", "Mapel", "Kelas", "Tahun Ajaran", "JP per Tahun", "Diperbarui"];
+
+function _sheet(nama, header) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(nama);
+  if (!sh) {
+    sh = ss.insertSheet(nama);
+    sh.appendRow(header);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function _json(o) {
+  return ContentService.createTextOutput(JSON.stringify(o))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function _teks(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), "dd-MM-yyyy");
+  return (v === null || v === undefined) ? "" : String(v);
+}
+
+function _kunciJurnal(a) {
+  var bagian = [];
+  for (var i = 0; i < 5; i++) bagian.push(_teks(a[i]).trim());
+  return bagian.join("|");
+}
+
+function doGet(e) {
+  return _json({ ok: true, pesan: "Apps Script KKG aktif" });
+}
+
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(15000);
+    var d = JSON.parse(e.postData.contents);
+    var aksi = d.aksi;
+
+    if (aksi === "tes") {
+      return _json({ ok: true, pesan: "Terhubung ke: " + SpreadsheetApp.getActiveSpreadsheet().getName() });
+    }
+
+    // Menambahkan jurnal dari aplikasi ke Sheet (hanya yang belum ada, tanpa duplikat)
+    if (aksi === "simpan_jurnal") {
+      var sh = _sheet("Jurnal", KOLOM_JURNAL);
+      var rows = d.rows || [];
+      var ada = {};
+      var data = sh.getDataRange().getValues();
+      for (var i = 1; i < data.length; i++) ada[_kunciJurnal(data[i])] = true;
+      var baru = [];
+      for (var j = 0; j < rows.length; j++) {
+        var baris = [];
+        for (var c = 0; c < KOLOM_JURNAL.length; c++) baris.push(_teks(rows[j][KOLOM_JURNAL[c]]));
+        var kn = _kunciJurnal(baris);
+        if (!ada[kn]) { ada[kn] = true; baru.push(baris); }
+      }
+      if (baru.length > 0) {
+        var rng = sh.getRange(sh.getLastRow() + 1, 1, baru.length, KOLOM_JURNAL.length);
+        rng.setNumberFormat("@");
+        rng.setValues(baru);
+      }
+      return _json({ ok: true, ditambah: baru.length, dilewati: rows.length - baru.length });
+    }
+
+    // Mengirim isi Sheet ke aplikasi
+    if (aksi === "muat_jurnal") {
+      var sm = _sheet("Jurnal", KOLOM_JURNAL);
+      var dataM = sm.getDataRange().getValues();
+      var keluar = [];
+      for (var k = 1; k < dataM.length; k++) {
+        if (!_teks(dataM[k][4]).trim()) continue;
+        var o = {};
+        for (var cc = 0; cc < KOLOM_JURNAL.length; cc++) o[KOLOM_JURNAL[cc]] = _teks(dataM[k][cc]);
+        keluar.push(o);
+      }
+      return _json({ ok: true, rows: keluar });
+    }
+
+    if (aksi === "simpan_jp") {
+      var sj = _sheet("JP_Tahunan", KOLOM_JP);
+      var kunci = d.mapel + "|" + d.kelas + "|" + d.tahun_ajaran;
+      var barisJp = [kunci, d.mapel, d.kelas, d.tahun_ajaran, d.jp_tahun, new Date()];
+      var dataJ = sj.getDataRange().getValues();
+      for (var m = 1; m < dataJ.length; m++) {
+        if (dataJ[m][0] === kunci) {
+          sj.getRange(m + 1, 1, 1, 6).setValues([barisJp]);
+          return _json({ ok: true });
+        }
+      }
+      sj.appendRow(barisJp);
+      return _json({ ok: true });
+    }
+
+    if (aksi === "muat_jp") {
+      var sp = _sheet("JP_Tahunan", KOLOM_JP);
+      var kunciM = d.mapel + "|" + d.kelas + "|" + d.tahun_ajaran;
+      var dataP = sp.getDataRange().getValues();
+      for (var n = 1; n < dataP.length; n++) {
+        if (dataP[n][0] === kunciM) {
+          return _json({ ok: true, jp_tahun: dataP[n][4] });
+        }
+      }
+      return _json({ ok: true, jp_tahun: null });
+    }
+
+    return _json({ ok: false, pesan: "Aksi tidak dikenal: " + aksi });
+  } catch (err) {
+    return _json({ ok: false, pesan: String(err) });
+  } finally {
+    try { lock.releaseLock(); } catch (x) {}
+  }
+}
+'''
+
+
+def gas_url_muat() -> str:
+    if AUTH_AKTIF:
+        if not st.session_state.user:
+            return ""
+        try:
+            r = requests.get(f"{SUPABASE_URL}/auth/v1/user", headers=_kunci_api_header(), timeout=15)
+            if r.status_code == 200:
+                return str((r.json().get("user_metadata") or {}).get("gas_url", "") or "").strip()
+        except Exception:
+            pass
+        return ""
+    try:
+        with open(FILE_GAS_URL, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def gas_url_simpan(url: str):
+    """Simpan (atau hapus jika kosong) URL Apps Script. Mengembalikan (ok, pesan_error)."""
+    url = (url or "").strip()
+    if AUTH_AKTIF:
+        try:
+            r = requests.put(f"{SUPABASE_URL}/auth/v1/user", headers=_kunci_api_header(),
+                             json={"data": {"gas_url": url}}, timeout=15)
+        except Exception as e:
+            return False, f"Gagal menghubungi server: {e}"
+        if r.status_code == 200:
+            return True, ""
+        return False, "Sesi login mungkin sudah kedaluwarsa. Klik Keluar lalu masuk kembali."
+    try:
+        if url:
+            with open(FILE_GAS_URL, "w", encoding="utf-8") as f:
+                f.write(url)
+        elif os.path.exists(FILE_GAS_URL):
+            os.remove(FILE_GAS_URL)
+        return True, ""
+    except Exception as e:
+        return False, f"Tidak bisa menulis file penyimpanan: {e}"
+
+
+def gas_kirim(aksi: str, payload: dict = None):
+    """Kirim satu perintah ke Apps Script milik guru. Mengembalikan (True, dict_respons)
+    atau (False, pesan_error). Kegagalan di sini TIDAK boleh menggagalkan fitur lain."""
+    import json as _json
+    url = (st.session_state.get("gas_url") or "").strip()
+    if not url:
+        return False, "URL Apps Script belum diisi di sidebar."
+    try:
+        isi = _json.dumps({"aksi": aksi, **(payload or {})}, ensure_ascii=False, default=str)
+        r = requests.post(url, data=isi.encode("utf-8"),
+                          headers={"Content-Type": "text/plain;charset=utf-8"}, timeout=30)
+    except Exception as e:
+        return False, f"Gagal menghubungi Google Apps Script: {e}"
+    try:
+        j = r.json()
+    except Exception:
+        return False, ("Respons bukan dari Apps Script. Pastikan di-deploy sebagai Web App dengan akses "
+                       "'Siapa saja' (Anyone) dan URL berakhiran /exec.")
+    if not j.get("ok"):
+        return False, str(j.get("pesan") or "Apps Script menolak permintaan.")
+    return True, j
+
+
+def _kunci_jurnal(r: dict) -> str:
+    """Kunci pembanding supaya jurnal yang sama tidak dobel saat dipanggil dari Sheet."""
+    return "|".join(str(r.get(k, "")).strip() for k in ("Tanggal", "Kelas", "Mapel", "JP", "Materi"))
+
+
 def sb_keluar():
     try:
         get_supabase().auth.sign_out()
@@ -480,6 +678,8 @@ def sb_keluar():
     st.session_state.groq_key_tersimpan = ""
     st.session_state.groq_key_loaded = False
     st.session_state.groq_key_ganti = False
+    st.session_state.gas_url = ""
+    st.session_state.gas_loaded = False
     st.session_state.jurnal_rows = []
     st.session_state.siswa_rows = []
 
@@ -1225,6 +1425,9 @@ if AUTH_AKTIF and st.session_state.user is not None and not st.session_state.dat
 if not st.session_state.groq_key_loaded:
     st.session_state.groq_key_tersimpan = kunci_api_muat()
     st.session_state.groq_key_loaded = True
+if not st.session_state.gas_loaded:
+    st.session_state.gas_url = gas_url_muat()
+    st.session_state.gas_loaded = True
 
 
 # ============================================================
@@ -2060,6 +2263,30 @@ with st.sidebar:
         "tertulis di source code / dibagikan publik, segera regenerate di console.groq.com."
     )
     st.divider()
+    with st.expander("☁️ Simpan ke Google Sheet (Apps Script)"):
+        st.caption("Jurnal Mengajar & JP per Tahun dikirim ke Google Sheet milik akun Google Anda "
+                   "sendiri, hanya saat Anda menekan tombolnya (tidak real time). Panduan pemasangan ada di "
+                   "panel '☁️ Panduan Google Sheet' di halaman utama.")
+        _gas_in = st.text_input("URL Web App Apps Script", value=st.session_state.gas_url,
+                                key="input_gas_url", placeholder="https://script.google.com/macros/s/.../exec")
+        _g1, _g2 = st.columns(2)
+        with _g1:
+            if st.button("💾 Simpan URL", key="btn_simpan_gas", use_container_width=True):
+                st.session_state.gas_url = _gas_in.strip()
+                ok_g, err_g = gas_url_simpan(_gas_in)
+                if ok_g:
+                    st.success("✅ URL tersimpan.")
+                else:
+                    st.warning(f"⚠️ Dipakai untuk sesi ini, belum tersimpan permanen: {err_g}")
+        with _g2:
+            if st.button("🧪 Tes Koneksi", key="btn_tes_gas", use_container_width=True):
+                st.session_state.gas_url = _gas_in.strip()
+                ok_g, hasil_g = gas_kirim("tes")
+                if ok_g:
+                    st.success(f"✅ {hasil_g.get('pesan', 'Terhubung.')}")
+                else:
+                    st.error(f"❌ {hasil_g}")
+    st.divider()
     st.subheader("🏫 Identitas Sekolah")
     st.session_state.sekolah = st.text_input("Nama Sekolah", st.session_state.sekolah)
     st.session_state.tahun_ajaran = st.text_input("Tahun Ajaran", st.session_state.tahun_ajaran)
@@ -2084,6 +2311,21 @@ with st.sidebar:
 st.title("📚 Generator Perangkat Ajar Kurikulum Merdeka")
 st.caption(f"Aplikasi Pembantu Guru {st.session_state.sekolah} — Powered by Groq / Llama-3.3 — "
            f"Berpedoman Pembelajaran Mendalam (Deep Learning)")
+
+with st.expander("☁️ Panduan Google Sheet (simpan Jurnal & JP ke akun Google Anda)"):
+    st.markdown(
+        "1. Buka **Google Sheet baru** milik Anda (sheets.new).\n"
+        "2. Menu **Ekstensi > Apps Script**, hapus isi bawaan, lalu **tempel kode di bawah**, klik **Simpan**.\n"
+        "3. Klik **Terapkan (Deploy) > Deployment baru > jenis: Aplikasi web**. "
+        "Isi *Jalankan sebagai*: **Saya**, *Siapa yang memiliki akses*: **Siapa saja**. Klik **Terapkan** dan izinkan akses.\n"
+        "4. Salin **URL aplikasi web** (berakhiran `/exec`), tempel di sidebar **☁️ Simpan ke Google Sheet**, "
+        "klik **Simpan URL** lalu **Tes Koneksi**.\n\n"
+        "Jika sebelumnya sudah memasang kode lama: tempel kode terbaru ini, lalu **Terapkan > Kelola deployment > ikon pensil > Versi baru > Terapkan** "
+        "(URL tetap sama). "
+        "Setiap guru memakai Sheet & URL-nya sendiri, jadi data tidak tercampur. "
+        "Jaga kerahasiaan URL karena siapa pun yang punya URL itu bisa menulis ke Sheet Anda."
+    )
+    st.code(GAS_KODE_APPS_SCRIPT, language="javascript")
 
 tab_tp, tab_modul, tab_lkpd, tab_prota, tab_minggu, tab_jurnal, tab_absen = st.tabs(
     ["🎯 TP & ATP", "📖 Modul Ajar", "📝 LKPD", "📅 PROTA & PROMES",
@@ -2491,9 +2733,58 @@ with tab_prota:
     with c1:
         pp_mapel = st.selectbox("Mata Pelajaran", SUBJECT_OPTIONS, key="pp_mapel")
         pp_kelas = st.selectbox("Kelas (1-6)", KELAS_OPTIONS, key="pp_kelas")
+        pp_jp_tahun = st.number_input(
+            "Jumlah JP per Tahun", min_value=1, max_value=1000, value=72, step=1, key="pp_jp_tahun",
+            help="Total Jam Pelajaran mapel ini selama satu tahun ajaran (kedua semester).",
+        )
     with c2:
         pp_minggu_ganjil = st.number_input("Minggu Efektif Semester Ganjil", 8, 24, 18, key="pp_mg")
         pp_minggu_genap = st.number_input("Minggu Efektif Semester Genap", 8, 24, 18, key="pp_mgg")
+
+    _total_minggu = pp_minggu_ganjil + pp_minggu_genap
+    pp_jp_ganjil = round(pp_jp_tahun * pp_minggu_ganjil / _total_minggu)
+    pp_jp_genap = pp_jp_tahun - pp_jp_ganjil
+    st.caption(
+        f"📊 Total **{pp_jp_tahun} JP/tahun** → perkiraan Semester Ganjil **{pp_jp_ganjil} JP**, "
+        f"Semester Genap **{pp_jp_genap} JP** (dibagi sesuai proporsi minggu efektif)."
+    )
+
+    def _jp_params():
+        return {"mapel": st.session_state.get("pp_mapel", ""), "kelas": st.session_state.get("pp_kelas", ""),
+                "tahun_ajaran": st.session_state.tahun_ajaran}
+
+    def _jp_simpan_cb():
+        ok, hasil = gas_kirim("simpan_jp", {**_jp_params(), "jp_tahun": int(st.session_state.get("pp_jp_tahun", 0))})
+        st.session_state["_pesan_jp"] = (
+            ("ok", "✅ JP per tahun tersimpan ke Google Sheet Anda.") if ok else ("err", f"❌ {hasil}"))
+
+    def _jp_muat_cb():
+        ok, hasil = gas_kirim("muat_jp", _jp_params())
+        if not ok:
+            st.session_state["_pesan_jp"] = ("err", f"❌ {hasil}")
+        elif hasil.get("jp_tahun") in (None, ""):
+            st.session_state["_pesan_jp"] = ("info", "ℹ️ Belum ada JP tersimpan untuk mapel, kelas, dan tahun ajaran ini.")
+        else:
+            try:
+                st.session_state.pp_jp_tahun = max(1, min(1000, int(float(hasil["jp_tahun"]))))
+                st.session_state["_pesan_jp"] = ("ok", f"✅ JP per tahun dimuat: {st.session_state.pp_jp_tahun} JP.")
+            except Exception:
+                st.session_state["_pesan_jp"] = ("err", "❌ Nilai JP di Google Sheet tidak valid.")
+
+    _ada_gas = bool((st.session_state.get("gas_url") or "").strip())
+    _gj1, _gj2 = st.columns(2)
+    with _gj1:
+        st.button("💾 Simpan JP ke Google Sheet", key="btn_jp_simpan", on_click=_jp_simpan_cb,
+                  disabled=not _ada_gas, use_container_width=True)
+    with _gj2:
+        st.button("📥 Muat JP dari Google Sheet", key="btn_jp_muat", on_click=_jp_muat_cb,
+                  disabled=not _ada_gas, use_container_width=True)
+    _pjp = st.session_state.pop("_pesan_jp", None)
+    if _pjp:
+        {"ok": st.success, "err": st.error, "info": st.info}[_pjp[0]](_pjp[1])
+    if not _ada_gas:
+        st.caption("ℹ️ Isi URL Apps Script di sidebar (☁️ Simpan ke Google Sheet) agar JP bisa disimpan "
+                   "permanen di akun Google Anda.")
 
     pp_materi = st.text_area(
         "Daftar Materi Pokok / TP satu tahun (bisa salin dari tab TP & ATP)",
@@ -2532,6 +2823,7 @@ DATA INPUT:
 - Tahun Ajaran: {st.session_state.tahun_ajaran}
 - Minggu Efektif Semester Ganjil: {pp_minggu_ganjil} minggu
 - Minggu Efektif Semester Genap: {pp_minggu_genap} minggu
+- Jumlah JP per Tahun: {pp_jp_tahun} JP (perkiraan Semester Ganjil {pp_jp_ganjil} JP, Semester Genap {pp_jp_genap} JP)
 - Daftar Materi Pokok / TP setahun: {pp_materi}
 {f"- REFERENSI TAMBAHAN dari guru (jadikan acuan bila relevan): {pp_referensi}" if pp_referensi else ""}
 
@@ -2545,18 +2837,21 @@ Satuan pendidikan, mapel, kelas, tahun ajaran.
 ## B. TABEL PROGRAM TAHUNAN
 Sajikan dalam TABEL markdown dengan kolom:
 | No | Semester | Materi Pokok / Tujuan Pembelajaran | Alokasi Waktu (JP) | Keterangan |
-Kelompokkan baris per semester (Ganjil dahulu, lalu Genap), alokasi waktu total harus
-proporsional dengan minggu efektif yang diberikan (asumsikan sekitar 2-4 JP per minggu per materi,
-sesuaikan agar realistis).
+Kelompokkan baris per semester (Ganjil dahulu, lalu Genap), jumlah seluruh alokasi waktu
+HARUS TEPAT {pp_jp_tahun} JP per tahun (Semester Ganjil {pp_jp_ganjil} JP dan Semester Genap {pp_jp_genap} JP),
+dibagi ke setiap materi secara proporsional dan realistis sesuai bobot materi. Sisihkan JP
+untuk penilaian (PTS/PAS) bila perlu, dan pastikan total akhir sama persis dengan {pp_jp_tahun} JP.
 
 ## C. REKAPITULASI
-Tabel ringkas: total JP semester ganjil, total JP semester genap, total JP satu tahun.
+Tabel ringkas: total JP semester ganjil, total JP semester genap, total JP satu tahun
+(total satu tahun harus {pp_jp_tahun} JP).
 
 Gunakan Bahasa Indonesia resmi dan terstruktur rapi.
 """
                 else:
                     judul = f"PROGRAM SEMESTER (PROMES) - SEMESTER {pp_semester_promes.upper()}"
                     minggu_pakai = pp_minggu_ganjil if pp_semester_promes == "Ganjil" else pp_minggu_genap
+                    jp_semester = pp_jp_ganjil if pp_semester_promes == "Ganjil" else pp_jp_genap
                     bulan_range = "Juli - Desember" if pp_semester_promes == "Ganjil" else "Januari - Juni"
                     with st.spinner(f"Menyusun Program Semester ({pp_semester_promes})..."):
                         prompt = f"""
@@ -2570,6 +2865,7 @@ DATA INPUT:
 - Tahun Ajaran: {st.session_state.tahun_ajaran}
 - Semester: {pp_semester_promes} (rentang bulan {bulan_range})
 - Minggu Efektif: {minggu_pakai} minggu
+- Jumlah JP per Tahun: {pp_jp_tahun} JP; alokasi untuk Semester {pp_semester_promes}: {jp_semester} JP
 - Daftar Materi Pokok / TP (ambil bagian yang relevan untuk semester {pp_semester_promes}): {pp_materi}
 {f"- REFERENSI TAMBAHAN dari guru (jadikan acuan bila relevan): {pp_referensi}" if pp_referensi else ""}
 
@@ -2583,6 +2879,7 @@ Satuan pendidikan, mapel, kelas, tahun ajaran, semester, rentang bulan {bulan_ra
 ## B. TABEL PROGRAM SEMESTER
 Sajikan dalam TABEL markdown dengan kolom:
 | No | Materi Pokok / TP | Alokasi Waktu (JP) | Bulan & Minggu Pelaksanaan | Keterangan |
+Jumlah seluruh Alokasi Waktu (JP) pada tabel HARUS TEPAT {jp_semester} JP.
 Sebar materi secara realistis ke {minggu_pakai} minggu efektif dalam rentang {bulan_range},
 sisakan alokasi untuk Penilaian Tengah Semester (PTS) dan Penilaian Akhir Semester (PAS)
 sebagai baris tersendiri di tabel.
@@ -2851,6 +3148,52 @@ with tab_jurnal:
                     st.rerun()
             else:
                 st.warning(status_jurnal)
+
+    with st.expander("☁️ Google Sheet — kirim atau panggil Jurnal lewat tombol"):
+        if not (st.session_state.get("gas_url") or "").strip():
+            st.info("Isi URL Apps Script di sidebar (☁️ Simpan ke Google Sheet) agar tombol di bawah aktif.")
+        else:
+            st.caption("Tidak berjalan otomatis. Data hanya dikirim/dipanggil saat tombol ditekan, "
+                       "dan catatan yang sama tidak akan dobel.")
+        _jg1, _jg2 = st.columns(2)
+        with _jg1:
+            kirim_jurnal_gs = st.button("📤 Kirim Jurnal ke Google Sheet", key="btn_jurnal_ke_gs",
+                                        use_container_width=True,
+                                        disabled=not (st.session_state.get("gas_url") or "").strip()
+                                        or not st.session_state.jurnal_rows)
+        with _jg2:
+            panggil_jurnal_gs = st.button("📥 Panggil Jurnal dari Google Sheet", key="btn_jurnal_dari_gs",
+                                          use_container_width=True,
+                                          disabled=not (st.session_state.get("gas_url") or "").strip())
+        if kirim_jurnal_gs:
+            with st.spinner("Mengirim jurnal ke Google Sheet..."):
+                _rows_kirim = [{k: v for k, v in r.items() if k != "id"} for r in st.session_state.jurnal_rows]
+                ok_g, hasil_g = gas_kirim("simpan_jurnal", {"rows": _rows_kirim})
+            if ok_g:
+                st.success(f"✅ {hasil_g.get('ditambah', 0)} catatan baru ditambahkan ke Google Sheet "
+                           f"({hasil_g.get('dilewati', 0)} sudah ada, dilewati).")
+            else:
+                st.error(f"❌ Gagal mengirim: {hasil_g}")
+        if panggil_jurnal_gs:
+            with st.spinner("Memanggil jurnal dari Google Sheet..."):
+                ok_g, hasil_g = gas_kirim("muat_jurnal")
+            if not ok_g:
+                st.error(f"❌ Gagal memanggil: {hasil_g}")
+            else:
+                _sudah = {_kunci_jurnal(r) for r in st.session_state.jurnal_rows}
+                _baru, _lewat = 0, 0
+                for r in hasil_g.get("rows", []):
+                    _row = {k: str(r.get(k, "")) for k in
+                            ("Tanggal", "Kelas", "Mapel", "JP", "Materi", "Kegiatan", "Hadir", "Catatan")}
+                    if not _row["Materi"].strip():
+                        continue
+                    if _kunci_jurnal(_row) in _sudah:
+                        _lewat += 1
+                        continue
+                    tambah_baris_jurnal(_row)
+                    _sudah.add(_kunci_jurnal(_row))
+                    _baru += 1
+                st.success(f"✅ {_baru} catatan dipanggil dari Google Sheet ({_lewat} sudah ada, dilewati).")
 
     if st.session_state.jurnal_rows:
         st.markdown(f"**Total catatan jurnal: {len(st.session_state.jurnal_rows)}**")
