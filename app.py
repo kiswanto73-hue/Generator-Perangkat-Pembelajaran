@@ -2535,6 +2535,7 @@ with tab_modul:
     with c1:
         m_mapel = st.selectbox("Mata Pelajaran", SUBJECT_OPTIONS, key="m_mapel")
         m_kelas = st.selectbox("Kelas (1-6)", KELAS_OPTIONS, key="m_kelas")
+        m_semester = st.selectbox("Semester", ["Ganjil", "Genap"], key="m_semester")
         m_alokasi = st.text_input("Alokasi Waktu per Pertemuan", "2 x 35 Menit", key="m_alokasi")
         m_pertemuan = st.number_input(
             "Jumlah Pertemuan", min_value=1, max_value=10, value=1, step=1, key="m_pertemuan",
@@ -2593,6 +2594,7 @@ DATA INPUT:
 - Guru Penyusun: {st.session_state.penyusun or '(diisi oleh guru)'}
 - Mata Pelajaran: {m_mapel}
 - Kelas: {label_kelas_fase(m_kelas)}
+- Semester: {m_semester}
 - Topik Utama: {m_topik}
 - Alokasi Waktu: {alokasi_lengkap}
 - Jumlah Pertemuan: {n_pert} pertemuan (alokasi waktu per pertemuan: {m_alokasi})
@@ -2695,6 +2697,7 @@ Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
                         "Satuan Pendidikan": st.session_state.sekolah,
                         "Mata Pelajaran": m_mapel,
                         "Kelas": label_kelas_fase(m_kelas),
+                        "Semester": m_semester,
                         "Topik": m_topik,
                         "Alokasi Waktu": alokasi_lengkap,
                         "Model Pembelajaran": m_model,
