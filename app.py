@@ -185,6 +185,17 @@ def label_kelas_fase(kelas: str) -> str:
     return f"{kelas} ({KELAS_FASE_MAP.get(kelas, '')})"
 
 
+# Model pembelajaran untuk Modul Ajar beserta sintaks/tahapannya
+MODEL_SINTAKS = {
+    "Discovery Learning": "Stimulasi; Identifikasi masalah; Pengumpulan data; Pengolahan data; Pembuktian (verifikasi); Menarik kesimpulan (generalisasi)",
+    "Problem Based Learning (PBL)": "Orientasi murid pada masalah; Mengorganisasi murid untuk belajar; Membimbing penyelidikan; Mengembangkan dan menyajikan hasil karya; Menganalisis dan mengevaluasi proses pemecahan masalah",
+    "Project Based Learning (PjBL)": "Penentuan pertanyaan mendasar; Mendesain perencanaan proyek; Menyusun jadwal; Memantau kemajuan proyek; Menguji hasil; Evaluasi pengalaman",
+    "Inquiry Learning": "Orientasi; Merumuskan masalah; Merumuskan hipotesis; Mengumpulkan data; Menguji hipotesis; Merumuskan kesimpulan",
+}
+MODEL_LAINNYA = "Lainnya (ketik sendiri)"
+MODEL_OPTIONS = list(MODEL_SINTAKS.keys()) + [MODEL_LAINNYA]
+
+
 # ============================================================
 # STATE AWAL
 # ============================================================
@@ -1604,6 +1615,86 @@ def call_groq(api_key: str, prompt: str, max_tokens: int = 6000) -> str:
     )
 
 
+def call_groq_status(api_key: str, prompt: str, max_tokens: int = 6000):
+    """Sama seperti call_groq, tetapi mengembalikan (teks, terpotong). terpotong=True bila
+    jawaban berhenti karena batas token (finish_reason == 'length'). Dipakai Modul Ajar."""
+    client = Groq(api_key=api_key)
+    coba_max = max_tokens
+    error_terakhir = None
+    for percobaan in range(3):
+        try:
+            completion = client.chat.completions.create(
+                model=MODEL_GROQ,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_completion_tokens=coba_max,
+            )
+            pilihan = completion.choices[0]
+            terpotong = (getattr(pilihan, "finish_reason", "") == "length")
+            return bersihkan_html(pilihan.message.content or ""), terpotong
+        except Exception as e:
+            error_terakhir = e
+            pesan = str(e)
+            if "rate_limit_exceeded" in pesan or "tokens per minute" in pesan or "Request too large" in pesan:
+                coba_max = max(1500, coba_max // 2)
+                continue
+            raise
+    raise RuntimeError(
+        "Permintaan ke Groq berulang kali ditolak karena melebihi batas token per menit. "
+        "Tunggu 1 menit lalu ulangi, atau upgrade API Key ke Groq Dev Tier. "
+        f"Detail teknis: {error_terakhir}"
+    )
+
+
+def pecah_baris_terakhir(teks: str):
+    """Pisahkan teks menjadi (bagian utuh, baris terakhir yang kemungkinan terpotong)."""
+    teks = teks.rstrip()
+    idx = teks.rfind("\n")
+    if idx == -1:
+        return "", teks
+    return teks[:idx], teks[idx + 1:]
+
+
+def prompt_lanjut_modul(hasil: str, k: dict) -> tuple:
+    """Susun prompt untuk melanjutkan Modul Ajar yang terpotong. Mengembalikan (prompt, bagian_utuh)."""
+    utuh, baris_potong = pecah_baris_terakhir(hasil)
+    judul = [ln.strip() for ln in utuh.split("\n") if ln.strip().startswith("#")]
+    ekor = utuh[-3500:]
+    prompt = f"""
+Anda sedang MELANJUTKAN penulisan sebuah MODUL AJAR KURIKULUM MERDEKA yang terpotong karena batas panjang.
+
+DATA MODUL:
+- Mata Pelajaran: {k['mapel']} | Kelas: {k['kelas']} | Topik: {k['topik']}
+- Alokasi Waktu: {k['alokasi']} | Jumlah Pertemuan: {k['n_pert']}
+- Model Pembelajaran: {k['model']}
+- Dimensi Profil Lulusan fokus: {k['profil']}
+
+STRUKTUR LENGKAP MODUL (semua bagian ini wajib ada pada akhirnya):
+A. INFORMASI UMUM (1 Identitas, 2 Kompetensi Awal, 3 Profil Lulusan, 4 Sarana Prasarana, 5 Target Peserta Didik, 6 Model Pembelajaran)
+B. KOMPONEN INTI (1 Tujuan Pembelajaran, 2 Pemahaman Bermakna, 3 Pertanyaan Pemantik,
+   4 Kegiatan Pembelajaran untuk Pertemuan ke-1 sampai ke-{k['n_pert']} (masing-masing Pendahuluan, Kegiatan Inti berupa tabel
+   | No | Langkah Kegiatan Murid & Guru | Prinsip Deep Learning | Dimensi Profil Lulusan |, dan Penutup),
+   5 Asesmen (Formatif, Rubrik Penilaian Capaian Tujuan, Asesmen Profil Lulusan))
+C. LAMPIRAN (1 LKPD ringkas, 2 Bahan Bacaan Guru & Murid, 3 Lembar Refleksi Murid berupa tabel | No | Pernyataan Refleksi | Ya | Belum |)
+
+JUDUL YANG SUDAH TERTULIS (jangan ditulis ulang):
+{chr(10).join(judul)}
+
+CUPLIKAN BAGIAN TERAKHIR YANG SUDAH TERTULIS (hanya sebagai konteks, JANGAN diulang):
+{ekor}
+
+BARIS TERAKHIR YANG TERPOTONG: {baris_potong}
+
+ATURAN:
+- Mulai jawaban dengan menulis ulang BARIS TERAKHIR YANG TERPOTONG itu secara lengkap, lalu lanjutkan persis dari sana.
+- Jangan membuat kalimat pembuka/penutup, jangan mengulang bagian yang sudah ada.
+- Lanjutkan sampai SEMUA bagian struktur di atas selesai, dengan format Markdown yang sama (tabel markdown, **Label** : isi, heading #### untuk sub-bagian).
+- Tulis ringkas dan padat agar muat sampai bagian terakhir.
+- Gunakan Bahasa Indonesia resmi.
+"""
+    return prompt, utuh
+
+
 # ============================================================
 # PARSER MARKDOWN BERSAMA (dipakai untuk PDF, DOCX & tampilan layar)
 # ============================================================
@@ -2444,13 +2535,22 @@ with tab_modul:
     with c1:
         m_mapel = st.selectbox("Mata Pelajaran", SUBJECT_OPTIONS, key="m_mapel")
         m_kelas = st.selectbox("Kelas (1-6)", KELAS_OPTIONS, key="m_kelas")
-        m_alokasi = st.text_input("Alokasi Waktu", "2 x 35 Menit (1 Pertemuan)", key="m_alokasi")
+        m_alokasi = st.text_input("Alokasi Waktu per Pertemuan", "2 x 35 Menit", key="m_alokasi")
+        m_pertemuan = st.number_input(
+            "Jumlah Pertemuan", min_value=1, max_value=10, value=1, step=1, key="m_pertemuan",
+            help="Kegiatan pembelajaran akan dipecah menjadi aktivitas per pertemuan sesuai jumlah ini.",
+        )
     with c2:
         m_topik = st.text_input("Topik / Materi Utama", key="m_topik")
         m_tp_acuan = st.text_area(
             "Tujuan Pembelajaran acuan (opsional, bisa salin dari tab TP & ATP)",
             height=90, key="m_tp_acuan",
         )
+        m_model_pilih = st.selectbox("Model Pembelajaran", MODEL_OPTIONS, key="m_model_pilih")
+        if m_model_pilih == MODEL_LAINNYA:
+            m_model = st.text_input("Tuliskan model pembelajaran", key="m_model_lain").strip()
+        else:
+            m_model = m_model_pilih
 
     m_profil = st.multiselect(
         "🎓 Fokus Dimensi Profil Lulusan (8 dimensi, bisa dikurangi sesuai kebutuhan)",
@@ -2468,10 +2568,19 @@ with tab_modul:
             st.error("⚠️ Mohon masukkan API Key Groq di sidebar terlebih dahulu.")
         elif not m_topik:
             st.error("⚠️ Mohon isi Topik / Materi Utama!")
+        elif not m_model:
+            st.error("⚠️ Mohon tuliskan Model Pembelajaran yang dipakai!")
         else:
             try:
                 with st.spinner("Groq AI sedang menyusun Modul Ajar presisi... Mohon tunggu..."):
                     profil_fokus_txt = ", ".join(m_profil or PROFIL_NAMA)
+                    n_pert = int(m_pertemuan)
+                    alokasi_lengkap = f"{m_alokasi} per pertemuan x {n_pert} pertemuan"
+                    sintaks_model = MODEL_SINTAKS.get(m_model, "")
+                    info_sintaks = (
+                        f"Sintaks resmi {m_model}: {sintaks_model}." if sintaks_model
+                        else f"Gunakan sintaks/tahapan baku dari model '{m_model}'."
+                    )
                     prompt = f"""
 Anda adalah Pakar Pengembang Kurikulum Merdeka dan Pengawas Sekolah Senior di Indonesia.
 Tugas Anda adalah membuatkan MODUL AJAR LENGKAP & SIAP PAKAI sesuai format resmi Kemendikbudristek.
@@ -2485,7 +2594,9 @@ DATA INPUT:
 - Mata Pelajaran: {m_mapel}
 - Kelas: {label_kelas_fase(m_kelas)}
 - Topik Utama: {m_topik}
-- Alokasi Waktu: {m_alokasi}
+- Alokasi Waktu: {alokasi_lengkap}
+- Jumlah Pertemuan: {n_pert} pertemuan (alokasi waktu per pertemuan: {m_alokasi})
+- Model Pembelajaran: {m_model}. {info_sintaks}
 - Tujuan Pembelajaran acuan (jika ada): {m_tp_acuan or 'Rumuskan sendiri berdasarkan topik.'}
 {f"- REFERENSI TAMBAHAN dari Buku Guru/materi yang diunggah (jadikan acuan isi & istilah bila relevan): {m_referensi}" if m_referensi else ""}
 
@@ -2507,7 +2618,7 @@ ATURAN PENULISAN AGAR HASIL CETAK RAPI:
 **Jenjang / Kelas / Fase** : SD / {label_kelas_fase(m_kelas)}
 **Mata Pelajaran** : {m_mapel}
 **Topik** : {m_topik}
-**Alokasi Waktu** : {m_alokasi}
+**Alokasi Waktu** : {alokasi_lengkap}
 ### 2. Kompetensi Awal
 Pengetahuan/keterampilan dasar yang harus dimiliki murid sebelum materi ini (2-4 poin singkat).
 ### 3. Profil Lulusan (Dimensi Fokus)
@@ -2519,7 +2630,8 @@ Alat dan bahan yang dibutuhkan (bullet).
 ### 5. Target Peserta Didik
 Reguler / Tipikal, serta catatan diferensiasi singkat.
 ### 6. Model Pembelajaran
-**Model** : (misal Problem Based Learning / Project Based Learning)
+**Model** : {m_model}
+**Sintaks** : (ringkas tahapan {m_model} yang dipakai, dipisah titik koma)
 **Pendekatan** : Pembelajaran Mendalam (Mindful, Meaningful, Joyful)
 **Metode** : (sebutkan)
 
@@ -2531,15 +2643,25 @@ Manfaat materi dalam kehidupan sehari-hari murid.
 ### 3. Pertanyaan Pemantik
 2-3 pertanyaan pemicu diskusi di awal kelas.
 ### 4. Kegiatan Pembelajaran
-#### Pendahuluan (10 Menit)
+Kegiatan pembelajaran DIPECAH MENJADI {n_pert} PERTEMUAN. Setiap pertemuan memiliki aktivitas yang BERBEDA dan
+berkesinambungan (jangan menyalin kegiatan yang sama), mengikuti sintaks {m_model} yang disebar berurutan
+sepanjang pertemuan (jika hanya 1 pertemuan, seluruh sintaks dimuat dalam satu pertemuan). Tulis nama tahap
+sintaks pada langkah kegiatan. Durasi tiap pertemuan menyesuaikan alokasi waktu per pertemuan ({m_alokasi}),
+kira-kira 15% pendahuluan, 70% inti, 15% penutup; tulis durasinya dalam menit.
+Untuk SETIAP pertemuan ke-1 sampai ke-{n_pert}, tulis tepat tiga sub-judul berikut (ganti X dengan nomor pertemuan,
+tulis fokus/judul kegiatan pertemuan itu pada sub-judul Pendahuluan):
+#### Pertemuan ke-X: Pendahuluan (... Menit) - (fokus pertemuan)
 Langkah bernomor 1., 2., 3. (orientasi, apersepsi, motivasi), tiap langkah diberi label prinsip Deep Learning.
-#### Kegiatan Inti (50 Menit)
+Pertemuan ke-2 dan seterusnya diawali mengulas singkat hasil pertemuan sebelumnya.
+#### Pertemuan ke-X: Kegiatan Inti (... Menit)
 Sajikan dalam TABEL markdown dengan kolom:
 | No | Langkah Kegiatan Murid & Guru | Prinsip Deep Learning | Dimensi Profil Lulusan |
 SETIAP langkah diberi prinsip (Mindful/Meaningful/Joyful) dan 1-2 dimensi profil lulusan yang diperkuat.
-Seluruh dimensi fokus harus muncul minimal satu kali pada rangkaian langkah ini.
-#### Penutup (10 Menit)
-Langkah bernomor: evaluasi, refleksi (Mindful) termasuk refleksi dimensi profil lulusan, dan rencana pertemuan berikutnya.
+Seluruh dimensi fokus harus muncul minimal satu kali pada rangkaian seluruh pertemuan.
+#### Pertemuan ke-X: Penutup (... Menit)
+Langkah bernomor: evaluasi, refleksi (Mindful) termasuk refleksi dimensi profil lulusan, dan rencana pertemuan berikutnya
+(pada pertemuan terakhir: kesimpulan akhir dan tindak lanjut).
+Tulis isi tiap pertemuan ringkas dan padat agar seluruh {n_pert} pertemuan dan bagian C Lampiran tetap termuat utuh.
 ### 5. Asesmen
 #### Asesmen Formatif
 **Teknik** : (observasi / unjuk kerja / tes tertulis, dst.)
@@ -2561,14 +2683,21 @@ Buat satu pernyataan per dimensi fokus; kolom Ya/Belum diisi tanda [  ].
 
 Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
 """
-                    hasil = call_groq(groq_api_key, prompt, max_tokens=7500)
+                    hasil, terpotong = call_groq_status(groq_api_key, prompt, max_tokens=min(7500 + 2000 * (n_pert - 1), 14000))
                     st.session_state.hasil_modul = hasil
+                    st.session_state.modul_terpotong = terpotong
+                    st.session_state.modul_konteks = {
+                        "mapel": m_mapel, "kelas": label_kelas_fase(m_kelas), "topik": m_topik,
+                        "alokasi": alokasi_lengkap, "n_pert": n_pert, "model": m_model,
+                        "profil": profil_fokus_txt,
+                    }
                     st.session_state.meta_modul = {
                         "Satuan Pendidikan": st.session_state.sekolah,
                         "Mata Pelajaran": m_mapel,
                         "Kelas": label_kelas_fase(m_kelas),
                         "Topik": m_topik,
-                        "Alokasi Waktu": m_alokasi,
+                        "Alokasi Waktu": alokasi_lengkap,
+                        "Model Pembelajaran": m_model,
                         "Guru Penyusun": st.session_state.penyusun,
                         "NIP Guru": st.session_state.guru_nip,
                         "Kepala Sekolah": st.session_state.kepsek_nama,
@@ -2579,6 +2708,28 @@ Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
                 st.error(f"❌ Terjadi kesalahan API Groq: {e}")
 
     if st.session_state.hasil_modul:
+        if st.session_state.get("modul_terpotong") and st.session_state.get("modul_konteks"):
+            st.warning("⚠️ Hasil modul terpotong karena batas panjang jawaban AI. "
+                       "Klik tombol di bawah untuk menyambung dari bagian yang terpotong (bisa diulang sampai lengkap).")
+            if st.button("➕ Lanjutkan Bagian yang Terpotong", key="btn_modul_lanjut"):
+                if not groq_api_key:
+                    st.error("⚠️ Mohon masukkan API Key Groq di sidebar terlebih dahulu.")
+                else:
+                    try:
+                        with st.spinner("Groq AI sedang melanjutkan bagian yang terpotong..."):
+                            prompt_l, utuh = prompt_lanjut_modul(st.session_state.hasil_modul,
+                                                                 st.session_state.modul_konteks)
+                            sambungan, masih_potong = call_groq_status(groq_api_key, prompt_l, max_tokens=6000)
+                            if sambungan.strip():
+                                st.session_state.hasil_modul = utuh.rstrip() + "\n" + sambungan.strip()
+                            st.session_state.modul_terpotong = masih_potong
+                        if masih_potong:
+                            st.warning("Masih ada bagian yang belum selesai, klik tombol Lanjutkan sekali lagi.")
+                        else:
+                            st.success("✨ Modul berhasil dilengkapi!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Terjadi kesalahan API Groq: {e}")
         tampilkan_hasil(st.session_state.hasil_modul)
         pdf_bytes = generate_pdf("MODUL AJAR KURIKULUM MERDEKA",
                                   st.session_state.meta_modul, st.session_state.hasil_modul)
