@@ -1615,7 +1615,7 @@ def call_groq(api_key: str, prompt: str, max_tokens: int = 6000) -> str:
     )
 
 
-def call_groq_status(api_key: str, prompt: str, max_tokens: int = 6000):
+def call_groq_status(api_key: str, prompt: str, max_tokens: int = 6000, temperature: float = 0.6):
     """Sama seperti call_groq, tetapi mengembalikan (teks, terpotong). terpotong=True bila
     jawaban berhenti karena batas token (finish_reason == 'length'). Dipakai Modul Ajar."""
     client = Groq(api_key=api_key)
@@ -1626,7 +1626,7 @@ def call_groq_status(api_key: str, prompt: str, max_tokens: int = 6000):
             completion = client.chat.completions.create(
                 model=MODEL_GROQ,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
+                temperature=temperature,
                 max_completion_tokens=coba_max,
             )
             pilihan = completion.choices[0]
@@ -1655,6 +1655,43 @@ def pecah_baris_terakhir(teks: str):
     return teks[:idx], teks[idx + 1:]
 
 
+ABCD_GUIDE = """
+ATURAN PERUMUSAN TUJUAN PEMBELAJARAN (TP) - FORMAT ABCD (WAJIB):
+Setiap TP harus dirumuskan sebagai SATU kalimat utuh yang memuat empat unsur berikut:
+- A (Audience)  : subjek/sasaran, yaitu murid (contoh: "Murid kelas ...").
+- B (Behavior)  : perilaku/kemampuan yang dapat diamati dan diukur, memakai SATU kata kerja operasional
+                  (contoh: menjelaskan, menghitung, mengidentifikasi, membuat, mempresentasikan).
+- C (Condition) : kondisi/situasi/sarana yang diberikan saat murid menunjukkan perilaku
+                  (contoh: "melalui diskusi kelompok", "dengan bantuan gambar/benda konkret", "setelah mengamati ...").
+- D (Degree)    : tingkat/kriteria keberhasilan yang terukur
+                  (contoh: "dengan benar", "minimal 4 dari 5 soal", "dengan tepat dan runtut").
+Pola kalimat: "[C: Kondisi], [A: Murid] dapat [B: kata kerja operasional + objek materi] [D: tingkat capaian]."
+Contoh: "Melalui pengamatan gambar dan diskusi kelompok, murid kelas 4 dapat mengidentifikasi sifat-sifat bangun datar dengan tepat minimal 4 dari 5 contoh."
+Jangan membuat TP yang tidak memuat keempat unsur tersebut.
+"""
+
+
+def susun_blok_tp(tp_input: str) -> str:
+    """Susun aturan KETAT agar Modul Ajar hanya memakai TP yang diinput guru."""
+    tp_input = (tp_input or "").strip()
+    if tp_input:
+        return (
+            "TUJUAN PEMBELAJARAN (TP) YANG DIINPUT GURU (SATU-SATUNYA TP YANG BOLEH DIPAKAI):\n"
+            f"{tp_input}\n"
+            "ATURAN KETAT TP: (a) Pada bagian B.1 tulis HANYA TP di atas, dirumuskan dalam format ABCD "
+            "(Audience, Behavior, Condition, Degree) tanpa mengubah makna dan cakupannya; satu TP input = satu TP hasil. "
+            "JANGAN menambah TP baru, JANGAN memecah satu TP menjadi banyak TP, JANGAN memperluas cakupannya. "
+            "(b) Seluruh kegiatan pembelajaran, asesmen, rubrik, LKPD, bahan bacaan, dan refleksi HANYA boleh "
+            "mengukur dan membahas TP di atas; materi di luar TP tersebut tidak boleh muncul. "
+            "(c) Topik hanya sebagai judul/konteks, bukan alasan memperluas cakupan materi."
+        )
+    return (
+        "TUJUAN PEMBELAJARAN (TP): guru tidak mengisi TP. Rumuskan MAKSIMAL 2 TP yang sempit dan spesifik "
+        "sesuai topik (jangan lebih) dengan format ABCD (Audience, Behavior, Condition, Degree), "
+        "lalu seluruh kegiatan, asesmen, LKPD, dan refleksi HANYA mengacu pada TP itu."
+    )
+
+
 def prompt_lanjut_modul(hasil: str, k: dict) -> tuple:
     """Susun prompt untuk melanjutkan Modul Ajar yang terpotong. Mengembalikan (prompt, bagian_utuh)."""
     utuh, baris_potong = pecah_baris_terakhir(hasil)
@@ -1668,6 +1705,8 @@ DATA MODUL:
 - Alokasi Waktu: {k['alokasi']} | Jumlah Pertemuan: {k['n_pert']}
 - Model Pembelajaran: {k['model']}
 - Dimensi Profil Lulusan fokus: {k['profil']}
+{susun_blok_tp(k.get('tp', ''))}
+{ABCD_GUIDE}
 
 STRUKTUR LENGKAP MODUL (semua bagian ini wajib ada pada akhirnya):
 A. INFORMASI UMUM (1 Identitas, 2 Kompetensi Awal, 3 Profil Lulusan, 4 Sarana Prasarana, 5 Target Peserta Didik, 6 Model Pembelajaran)
@@ -2566,6 +2605,7 @@ Susun TUJUAN PEMBELAJARAN (TP) dan ALUR TUJUAN PEMBELAJARAN (ATP) yang siap paka
 
 {DEEP_LEARNING_GUIDE}
 {profil_lulusan_guide()}
+{ABCD_GUIDE}
 
 DATA INPUT:
 - Satuan Pendidikan: {st.session_state.sekolah}
@@ -2588,12 +2628,15 @@ Sebutkan satuan pendidikan, mapel, kelas/fase, semester, tahun ajaran.
 Tuliskan ulang CP secara ringkas dan jelas.
 
 ## C. TUJUAN PEMBELAJARAN (TP)
-Buat daftar TP dengan kode (TP 1, TP 2, dst), masing-masing memuat KOMPETENSI + LINGKUP MATERI,
-disusun terukur dan operasional (gunakan kata kerja operasional Taksonomi Bloom revisi).
+Buat daftar TP dengan kode (TP 1, TP 2, dst). Setiap TP WAJIB ditulis dalam format ABCD
+(Audience, Behavior, Condition, Degree) sebagai satu kalimat utuh yang memuat KOMPETENSI + LINGKUP MATERI,
+dengan kata kerja operasional Taksonomi Bloom revisi. Setelah tiap TP, boleh diberi keterangan singkat
+dalam satu baris: (A: ... | B: ... | C: ... | D: ...) untuk memperlihatkan keempat unsurnya.
 
 ## D. ALUR TUJUAN PEMBELAJARAN (ATP)
 Sajikan dalam bentuk TABEL markdown dengan kolom:
 | No | Kode TP | Tujuan Pembelajaran | Alokasi Waktu (JP) | Dimensi Profil Lulusan Terkait | Prinsip Deep Learning (Mindful/Meaningful/Joyful) |
+Kolom "Tujuan Pembelajaran" memuat TP yang SAMA dengan bagian C (berformat ABCD).
 Urutkan dari kompetensi prasyarat termudah menuju paling kompleks (logis & berjenjang).
 Kolom "Dimensi Profil Lulusan Terkait" diisi 1-3 dimensi dari 8 dimensi resmi (tulis nama resminya).
 Isi sel ringkas agar tabel proporsional dan mudah dibaca; kolom No/Kode TP/JP cukup singkat.
@@ -2652,7 +2695,7 @@ with tab_modul:
     with c2:
         m_topik = st.text_input("Topik / Materi Utama", key="m_topik")
         m_tp_acuan = st.text_area(
-            "Tujuan Pembelajaran acuan (opsional, bisa salin dari tab TP & ATP)",
+            "Tujuan Pembelajaran (disarankan diisi; hanya TP ini yang akan dimuat di Modul Ajar)",
             height=90, key="m_tp_acuan",
         )
         m_model_pilih = st.selectbox("Model Pembelajaran", MODEL_OPTIONS, key="m_model_pilih")
@@ -2701,12 +2744,14 @@ with tab_modul:
                         f"Sintaks resmi {m_model}: {sintaks_model}." if sintaks_model
                         else f"Gunakan sintaks/tahapan baku dari model '{m_model}'."
                     )
+                    blok_tp = susun_blok_tp(m_tp_acuan)
                     prompt = f"""
 Anda adalah Pakar Pengembang Kurikulum Merdeka dan Pengawas Sekolah Senior di Indonesia.
 Tugas Anda adalah membuatkan MODUL AJAR LENGKAP & SIAP PAKAI sesuai format resmi Kemendikbudristek.
 
 {DEEP_LEARNING_GUIDE}
 {profil_lulusan_guide(m_profil)}
+{ABCD_GUIDE}
 
 DATA INPUT:
 - Satuan Pendidikan: {st.session_state.sekolah}
@@ -2718,7 +2763,7 @@ DATA INPUT:
 - Alokasi Waktu: {alokasi_lengkap}
 - Jumlah Pertemuan: {n_pert} pertemuan (alokasi waktu per pertemuan: {m_alokasi})
 - Model Pembelajaran: {m_model}. {info_sintaks}
-- Tujuan Pembelajaran acuan (jika ada): {m_tp_acuan or 'Rumuskan sendiri berdasarkan topik.'}
+{blok_tp}
 {f"- REFERENSI TAMBAHAN dari Buku Guru/materi yang diunggah (jadikan acuan isi & istilah bila relevan): {m_referensi}" if m_referensi else ""}
 
 PETUNJUK FORMAT OUTPUT (Wajib Rapi dengan Markdown, ikuti persis pola penulisan berikut):
@@ -2758,7 +2803,9 @@ Reguler / Tipikal, serta catatan diferensiasi singkat.
 
 ## B. KOMPONEN INTI
 ### 1. Tujuan Pembelajaran (TP)
-Jabarkan secara rinci dan terukur (bullet).
+Tulis HANYA TP yang tercantum pada DATA INPUT, bernomor (TP 1, TP 2, dst), masing-masing satu kalimat berformat
+ABCD (Audience, Behavior, Condition, Degree) tanpa mengubah makna/cakupan. Dilarang menambah, memecah, atau
+memperluas TP. Jika guru tidak mengisi TP, tulis maksimal 2 TP sempit sesuai topik, juga berformat ABCD.
 ### 2. Pemahaman Bermakna
 Manfaat materi dalam kehidupan sehari-hari murid.
 ### 3. Pertanyaan Pemantik
@@ -2788,6 +2835,7 @@ Tulis isi tiap pertemuan ringkas dan padat agar seluruh {n_pert} pertemuan dan b
 **Teknik** : (observasi / unjuk kerja / tes tertulis, dst.)
 **Instrumen** : (lembar observasi / rubrik / soal)
 #### Rubrik Penilaian Capaian Tujuan
+(Aspek yang dinilai HANYA berasal dari TP pada B.1, satu aspek per TP.)
 TABEL markdown skor 1-4 dengan kolom: | Aspek yang Dinilai | Skor 4 | Skor 3 | Skor 2 | Skor 1 |
 #### Asesmen Profil Lulusan
 TABEL markdown dengan kolom: | Dimensi Profil Lulusan | Indikator yang Diamati | Teknik / Instrumen |
@@ -2804,13 +2852,14 @@ Buat satu pernyataan per dimensi fokus; kolom Ya/Belum diisi tanda [  ].
 
 Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
 """
-                    hasil, terpotong = call_groq_status(groq_api_key, prompt, max_tokens=min(7500 + 2000 * (n_pert - 1), 14000))
+                    hasil, terpotong = call_groq_status(groq_api_key, prompt, max_tokens=min(7500 + 2000 * (n_pert - 1), 14000),
+                                                        temperature=0.3)
                     st.session_state.hasil_modul = hasil
                     st.session_state.modul_terpotong = terpotong
                     st.session_state.modul_konteks = {
                         "mapel": m_mapel, "kelas": label_kelas_fase(m_kelas), "topik": m_topik,
                         "alokasi": alokasi_lengkap, "n_pert": n_pert, "model": m_model,
-                        "profil": profil_fokus_txt,
+                        "profil": profil_fokus_txt, "tp": m_tp_acuan,
                     }
                     st.session_state.meta_modul = {
                         "Satuan Pendidikan": st.session_state.sekolah,
@@ -2841,7 +2890,7 @@ Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
                         with st.spinner("Groq AI sedang melanjutkan bagian yang terpotong..."):
                             prompt_l, utuh = prompt_lanjut_modul(st.session_state.hasil_modul,
                                                                  st.session_state.modul_konteks)
-                            sambungan, masih_potong = call_groq_status(groq_api_key, prompt_l, max_tokens=6000)
+                            sambungan, masih_potong = call_groq_status(groq_api_key, prompt_l, max_tokens=6000, temperature=0.3)
                             if sambungan.strip():
                                 st.session_state.hasil_modul = utuh.rstrip() + "\n" + sambungan.strip()
                             st.session_state.modul_terpotong = masih_potong
@@ -3095,6 +3144,8 @@ with tab_prota:
 Anda adalah Pakar Pengembang Kurikulum Merdeka di Indonesia.
 Susun PROGRAM TAHUNAN (PROTA) yang siap pakai untuk satu tahun ajaran penuh (2 semester).
 
+{ABCD_GUIDE}
+
 DATA INPUT:
 - Satuan Pendidikan: {st.session_state.sekolah}
 - Mata Pelajaran: {pp_mapel}
@@ -3116,6 +3167,8 @@ Satuan pendidikan, mapel, kelas, tahun ajaran.
 ## B. TABEL PROGRAM TAHUNAN
 Sajikan dalam TABEL markdown dengan kolom:
 | No | Semester | Materi Pokok / Tujuan Pembelajaran | Alokasi Waktu (JP) | Keterangan |
+Kolom "Materi Pokok / Tujuan Pembelajaran" diisi TP dalam format ABCD, hanya berdasarkan daftar materi/TP
+pada DATA INPUT (jangan menambah TP/materi baru); tulis singkat, satu kalimat per TP.
 Kelompokkan baris per semester (Ganjil dahulu, lalu Genap), jumlah seluruh alokasi waktu
 HARUS TEPAT {pp_jp_tahun} JP per tahun (Semester Ganjil {pp_jp_ganjil} JP dan Semester Genap {pp_jp_genap} JP),
 dibagi ke setiap materi secara proporsional dan realistis sesuai bobot materi. Sisihkan JP
@@ -3136,6 +3189,8 @@ Gunakan Bahasa Indonesia resmi dan terstruktur rapi.
                         prompt = f"""
 Anda adalah Pakar Pengembang Kurikulum Merdeka di Indonesia.
 Susun PROGRAM SEMESTER (PROMES) yang siap pakai untuk semester {pp_semester_promes}.
+
+{ABCD_GUIDE}
 
 DATA INPUT:
 - Satuan Pendidikan: {st.session_state.sekolah}
@@ -3158,6 +3213,8 @@ Satuan pendidikan, mapel, kelas, tahun ajaran, semester, rentang bulan {bulan_ra
 ## B. TABEL PROGRAM SEMESTER
 Sajikan dalam TABEL markdown dengan kolom:
 | No | Materi Pokok / TP | Alokasi Waktu (JP) | Bulan & Minggu Pelaksanaan | Keterangan |
+Kolom "Materi Pokok / TP" diisi TP dalam format ABCD, hanya berdasarkan daftar materi/TP pada DATA INPUT
+(jangan menambah TP/materi baru); tulis singkat, satu kalimat per TP. Baris PTS/PAS tidak perlu format ABCD.
 Jumlah seluruh Alokasi Waktu (JP) pada tabel HARUS TEPAT {jp_semester} JP.
 Sebar materi secara realistis ke {minggu_pakai} minggu efektif dalam rentang {bulan_range},
 sisakan alokasi untuk Penilaian Tengah Semester (PTS) dan Penilaian Akhir Semester (PAS)
