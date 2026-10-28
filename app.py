@@ -1993,6 +1993,107 @@ def blocks_to_pdf_flowables(blocks: list, styles: dict) -> list:
     return flowables
 
 
+# ---------- Blok Tanda Tangan (khusus Modul Ajar; opsional) ----------
+def _ttd_nilai(ttd: dict):
+    """Rapikan isian tanda tangan; kosong -> titik-titik agar bisa ditulis tangan."""
+    titik_nama = "." * 34
+    titik_nip = "." * 24
+    return {
+        "tempat_tgl": (ttd.get("tempat_tgl") or "").strip() or "Renah Mendaluh, ..............2026",
+        "jabatan_guru": (ttd.get("jabatan_guru") or "").strip() or "Guru Kelas",
+        "guru_nama": (ttd.get("guru_nama") or "").strip() or titik_nama,
+        "guru_nip": (ttd.get("guru_nip") or "").strip() or titik_nip,
+        "kepsek_nama": (ttd.get("kepsek_nama") or "").strip() or titik_nama,
+        "kepsek_nip": (ttd.get("kepsek_nip") or "").strip() or titik_nip,
+    }
+
+
+def _docx_blok_ttd(document, ttd: dict):
+    v = _ttd_nilai(ttd)
+    pt_cm = 28.3465
+    font_pt = 11
+
+    # Jarak dari isi dokumen; ikut pindah halaman bersama blok tanda tangan.
+    sp = document.add_paragraph()
+    sp.paragraph_format.space_before = Pt(10)
+    sp.paragraph_format.space_after = Pt(0)
+    sp.paragraph_format.keep_with_next = True
+
+    tbl = document.add_table(rows=1, cols=2)
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _docx_tetapkan_lebar(tbl, [8.5 * pt_cm, 8.5 * pt_cm])
+    row = tbl.rows[0]
+    trPr = row._tr.get_or_add_trPr()
+    cant = OxmlElement("w:cantSplit"); trPr.append(cant)   # baris tidak terpotong antar halaman
+
+    # (teks, tebal, garis bawah, spasi sesudah pt)
+    # Jumlah baris kiri-kanan sama agar nama kepala sekolah & guru sejajar.
+    kiri = [("", False, False, 0), ("Mengetahui,", False, False, 0), ("Kepala Sekolah", False, False, 0)]
+    kanan = [(v["tempat_tgl"], False, False, 0), ("Penyusun,", False, False, 0), (v["jabatan_guru"], False, False, 0)]
+
+    def isi_sel(cell, baris, nama, nip):
+        cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+        p = cell.paragraphs[0]
+        pertama = True
+        for teks, tebal, garis, _ in baris:
+            if not pertama:
+                p = cell.add_paragraph()
+            pertama = False
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
+            p.paragraph_format.keep_with_next = True
+            r = p.add_run(teks); r.font.size = Pt(font_pt); r.bold = tebal
+        # Ruang tanda tangan + stempel
+        for _ in range(4):
+            pk = cell.add_paragraph()
+            pk.paragraph_format.space_before = Pt(0)
+            pk.paragraph_format.space_after = Pt(0)
+            pk.paragraph_format.keep_with_next = True
+            pk.add_run("").font.size = Pt(font_pt)
+        pn = cell.add_paragraph()
+        pn.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        pn.paragraph_format.space_before = Pt(0)
+        pn.paragraph_format.space_after = Pt(0)
+        pn.paragraph_format.keep_with_next = True
+        rn = pn.add_run(nama); rn.bold = True; rn.underline = True; rn.font.size = Pt(font_pt)
+        pi = cell.add_paragraph()
+        pi.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        pi.paragraph_format.space_before = Pt(0)
+        pi.paragraph_format.space_after = Pt(0)
+        ri = pi.add_run(f"NIP. {nip}"); ri.font.size = Pt(font_pt)
+
+    isi_sel(row.cells[0], kiri, v["kepsek_nama"], v["kepsek_nip"])
+    isi_sel(row.cells[1], kanan, v["guru_nama"], v["guru_nip"])
+    return tbl
+
+
+def _pdf_blok_ttd(ttd: dict, styles: dict) -> list:
+    v = _ttd_nilai(ttd)
+    base = getSampleStyleSheet()
+    st_c = ParagraphStyle("TtdC", parent=base["Normal"], fontSize=10.8, leading=14, alignment=TA_CENTER)
+    st_nama = ParagraphStyle("TtdNama", parent=st_c, fontName="Helvetica-Bold")
+    kiri = [Paragraph("&nbsp;", st_c),
+            Paragraph("Mengetahui,", st_c),
+            Paragraph("Kepala Sekolah", st_c),
+            Spacer(1, 52),
+            Paragraph(f"<u>{_esc(v['kepsek_nama'])}</u>", st_nama),
+            Paragraph(f"NIP. {_esc(v['kepsek_nip'])}", st_c)]
+    kanan = [Paragraph(_esc(v["tempat_tgl"]), st_c),
+             Paragraph("Penyusun,", st_c),
+             Paragraph(_esc(v["jabatan_guru"]), st_c),
+             Spacer(1, 52),
+             Paragraph(f"<u>{_esc(v['guru_nama'])}</u>", st_nama),
+             Paragraph(f"NIP. {_esc(v['guru_nip'])}", st_c)]
+    t = Table([[kiri, kanan]], colWidths=[PDF_LEBAR_ISI / 2, PDF_LEBAR_ISI / 2])
+    t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                           ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                           ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
+    t.keepWithNext = False
+    from reportlab.platypus import KeepTogether
+    return [Spacer(1, 14), KeepTogether([t])]
+
+
 def _pdf_footer(canvas, doc):
     canvas.saveState()
     canvas.setStrokeColor(COLOR_ACCENT)
@@ -2019,7 +2120,8 @@ def _meta_pairs(meta: dict):
     return rows
 
 
-def generate_pdf(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: bytes = None) -> bytes:
+def generate_pdf(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: bytes = None,
+                 ttd: dict = None) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=A4,
@@ -2052,6 +2154,8 @@ def generate_pdf(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: b
             pass
 
     story.extend(blocks_to_pdf_flowables(parse_markdown_blocks(markdown_text), styles))
+    if ttd:
+        story.extend(_pdf_blok_ttd(ttd, styles))
     doc.build(story, onFirstPage=_pdf_footer, onLaterPages=_pdf_footer)
     buffer.seek(0)
     return buffer.getvalue()
@@ -2152,7 +2256,8 @@ def _docx_tabel_data(document, rows: list):
     return tbl
 
 
-def generate_docx(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: bytes = None) -> bytes:
+def generate_docx(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: bytes = None,
+                  ttd: dict = None) -> bytes:
     document = Document()
 
     section = document.sections[0]
@@ -2229,6 +2334,9 @@ def generate_docx(doc_title: str, meta: dict, markdown_text: str, gambar_bytes: 
         else:
             p = document.add_paragraph()
             _add_formatted_runs_docx(p, content)
+
+    if ttd:
+        _docx_blok_ttd(document, ttd)
 
     buffer = BytesIO()
     document.save(buffer)
@@ -2564,6 +2672,17 @@ with tab_modul:
 
     m_referensi = uploader_referensi("m_referensi_upl")
 
+    with st.expander("✍️ Tanda Tangan pada Hasil Download Modul Ajar", expanded=False):
+        m_ttd_aktif = st.checkbox("Sertakan kolom tanda tangan Kepala Sekolah & Guru",
+                                  value=True, key="m_ttd_aktif")
+        m_ttd_tempat_tgl = st.text_input(
+            "Tempat & Tanggal", value="Renah Mendaluh, ..............2026", key="m_ttd_tempat_tgl",
+            help="Dibiarkan titik-titik agar tanggal bisa ditulis tangan setelah dicetak.")
+        m_ttd_jabatan = st.selectbox("Jabatan Penyusun", ["Guru Kelas", "Guru Mata Pelajaran"],
+                                     key="m_ttd_jabatan")
+        st.caption("Nama & NIP diambil dari sidebar (Identitas Guru Penyusun dan Identitas Kepala Sekolah). "
+                   "Jika kosong, otomatis diganti titik-titik untuk diisi manual.")
+
     if st.button("🚀 Buat Modul Ajar Sekarang", key="btn_modul"):
         if not groq_api_key:
             st.error("⚠️ Mohon masukkan API Key Groq di sidebar terlebih dahulu.")
@@ -2734,10 +2853,16 @@ Gunakan Bahasa Indonesia resmi, komunikatif, dan terstruktur rapi.
                     except Exception as e:
                         st.error(f"❌ Terjadi kesalahan API Groq: {e}")
         tampilkan_hasil(st.session_state.hasil_modul)
+        ttd_modul = {
+            "tempat_tgl": m_ttd_tempat_tgl,
+            "jabatan_guru": m_ttd_jabatan,
+            "guru_nama": st.session_state.penyusun, "guru_nip": st.session_state.guru_nip,
+            "kepsek_nama": st.session_state.kepsek_nama, "kepsek_nip": st.session_state.kepsek_nip,
+        } if m_ttd_aktif else None
         pdf_bytes = generate_pdf("MODUL AJAR KURIKULUM MERDEKA",
-                                  st.session_state.meta_modul, st.session_state.hasil_modul)
+                                  st.session_state.meta_modul, st.session_state.hasil_modul, ttd=ttd_modul)
         docx_bytes = generate_docx("MODUL AJAR KURIKULUM MERDEKA",
-                                    st.session_state.meta_modul, st.session_state.hasil_modul)
+                                    st.session_state.meta_modul, st.session_state.hasil_modul, ttd=ttd_modul)
         download_row(f"Modul_Ajar_{m_mapel.replace(' ', '_') if m_mapel else 'Modul'}",
                      pdf_bytes, docx_bytes, "dl_modul")
 
