@@ -3055,8 +3055,303 @@ Gunakan Bahasa Indonesia yang komunikatif dan ramah anak sesuai jenjang {label_k
 # ============================================================
 # TAB 4 - PROGRAM TAHUNAN (PROTA) & PROGRAM SEMESTER (PROMES)
 # ============================================================
+# ---------- HELPER PROTA & PROMES ----------
+# TP disalin APA ADANYA dari TP & ATP (tanpa AI). PROMES hanya memetakan TP tsb ke minggu efektif.
+_TP_COLS = ["Kode TP", "Tujuan Pembelajaran", "JP", "Keterangan"]
+_BULAN_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
+             "Agustus", "September", "Oktober", "November", "Desember"]
+_BULAN_ID_SINGKAT = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+_BULAN_DARI_SINGKAT = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "mei": 5, "may": 5, "jun": 6, "jul": 7,
+                       "agu": 8, "agt": 8, "aug": 8, "sep": 9, "okt": 10, "oct": 10, "nov": 11,
+                       "des": 12, "dec": 12}
+_RENTANG_BULAN = {"Ganjil": [7, 8, 9, 10, 11, 12], "Genap": [1, 2, 3, 4, 5, 6]}
+
+
+def _df_tp_kosong():
+    return pd.DataFrame({"Kode TP": pd.Series(dtype="str"), "Tujuan Pembelajaran": pd.Series(dtype="str"),
+                         "JP": pd.Series(dtype="int"), "Keterangan": pd.Series(dtype="str")})
+
+
+def _bersih_sel(teks) -> str:
+    """Hanya membuang markup (**, <br>) dan spasi ganda; kata-kata TP tidak diubah."""
+    if teks is None or (isinstance(teks, float) and pd.isna(teks)):
+        return ""
+    t = re.sub(r"<br\s*/?>", " ", str(teks), flags=re.I)
+    return re.sub(r"\s+", " ", t.replace("**", "")).strip()
+
+
+def _angka_jp(teks) -> int:
+    m = re.search(r"\d+", _bersih_sel(teks))
+    return int(m.group()) if m else 0
+
+
+def _sel_md(teks) -> str:
+    return _bersih_sel(teks).replace("|", "/")
+
+
+def _petakan_kolom_tp(header: list):
+    """Cari kolom Kode TP / Tujuan Pembelajaran / JP dari baris judul tabel. None bila bukan tabel TP/ATP."""
+    h = [_bersih_sel(c).lower() for c in header]
+    i_tp = next((i for i, c in enumerate(h) if "tujuan" in c), None)
+    if i_tp is None:
+        return None
+    i_kode = next((i for i, c in enumerate(h) if "kode" in c), None)
+    i_jp = next((i for i, c in enumerate(h) if "alokasi" in c or c in ("jp", "jam pelajaran")), None)
+    return i_kode, i_tp, i_jp
+
+
+def _tp_dari_tabel(rows: list) -> list:
+    """rows[0] = judul kolom. Mengembalikan daftar TP (Kode TP, Tujuan Pembelajaran, JP, Keterangan)."""
+    if not rows:
+        return []
+    kol = _petakan_kolom_tp(rows[0])
+    if not kol:
+        return []
+    i_kode, i_tp, i_jp = kol
+    hasil = []
+    for r in rows[1:]:
+        if i_tp >= len(r):
+            continue
+        tp = _bersih_sel(r[i_tp])
+        if not tp:
+            continue
+        kode = _bersih_sel(r[i_kode]) if i_kode is not None and i_kode < len(r) else ""
+        jp = _angka_jp(r[i_jp]) if i_jp is not None and i_jp < len(r) else 0
+        hasil.append({"Kode TP": kode or f"TP {len(hasil) + 1}", "Tujuan Pembelajaran": tp,
+                      "JP": jp, "Keterangan": ""})
+    return hasil
+
+
+def tp_dari_markdown(md: str) -> list:
+    """Ambil TP dari hasil tab TP & ATP: tabel ATP (bagian D) dahulu; bila tak ada, daftar 'TP n: ...' (bagian C)."""
+    lines = (md or "").replace("\r\n", "\n").split("\n")
+    i = 0
+    while i < len(lines):
+        if lines[i].strip().startswith("|"):
+            blok = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not (any(cells) and all(re.fullmatch(r":?-+:?", c) for c in cells if c)):
+                    blok.append(cells)
+                i += 1
+            hasil = _tp_dari_tabel(blok)
+            if hasil:
+                return hasil
+            continue
+        i += 1
+    hasil = []
+    for ln in lines:
+        m = re.match(r"^\s*(?:[-*]\s*)?\**\s*(TP\s*\d+)\s*\**\s*[:.\-\u2013]\s*(.+)$", ln)
+        if m:
+            tp = _bersih_sel(m.group(2))
+            if tp:
+                hasil.append({"Kode TP": re.sub(r"\s+", " ", m.group(1)), "Tujuan Pembelajaran": tp,
+                              "JP": 0, "Keterangan": ""})
+    return hasil
+
+
+def tp_dari_baris(baris: list) -> list:
+    """Dari baris CSV/XLSX (list of dict) dengan kolom Kode TP, Tujuan Pembelajaran, Alokasi Waktu/JP."""
+    def ambil(kl, *kunci):
+        for x in kunci:
+            for k, v in kl.items():
+                if x in k:
+                    return v
+        return ""
+    hasil = []
+    for r in baris:
+        kl = {str(k).strip().lower(): v for k, v in r.items()}
+        tp = _bersih_sel(ambil(kl, "tujuan", "materi"))
+        if not tp:
+            continue
+        kode = _bersih_sel(ambil(kl, "kode"))
+        hasil.append({"Kode TP": kode or f"TP {len(hasil) + 1}", "Tujuan Pembelajaran": tp,
+                      "JP": _angka_jp(ambil(kl, "alokasi", "jp", "jam")), "Keterangan": ""})
+    return hasil
+
+
+def tp_dari_berkas(f):
+    """Baca berkas TP & ATP (DOCX / CSV / XLSX). Mengembalikan (daftar_tp, pesan_bila_gagal)."""
+    nama = f.name.lower()
+    try:
+        if nama.endswith(".docx"):
+            d = Document(BytesIO(f.getvalue()))
+            for t in d.tables:
+                hasil = _tp_dari_tabel([[c.text for c in r.cells] for r in t.rows])
+                if hasil:
+                    return hasil, ""
+            return [], "Tabel TP/ATP tidak ditemukan di berkas DOCX."
+        if nama.endswith((".csv", ".xlsx", ".xls")):
+            baris, status = baca_tabel_upload(f)
+            if not baris:
+                return [], status
+            return tp_dari_baris(baris), ""
+    except Exception as e:
+        return [], f"Gagal membaca berkas: {e}"
+    return [], "Format belum didukung (gunakan DOCX, CSV, atau XLSX)."
+
+
+def _df_ke_daftar(df) -> list:
+    out = []
+    for _, r in df.iterrows():
+        tp = _bersih_sel(r.get("Tujuan Pembelajaran"))
+        if not tp:
+            continue
+        jp = pd.to_numeric(r.get("JP"), errors="coerce")
+        out.append({"Kode TP": _bersih_sel(r.get("Kode TP")) or f"TP {len(out) + 1}",
+                    "Tujuan Pembelajaran": tp, "JP": 0 if pd.isna(jp) else int(jp),
+                    "Keterangan": _bersih_sel(r.get("Keterangan"))})
+    return out
+
+
+def _isi_jp_bila_kosong(daftar: list, target: int) -> bool:
+    """Bila SEMUA JP kosong, bagi rata target JP semester ke tiap TP. Selain itu JP dari ATP dipertahankan."""
+    if daftar and target > 0 and sum(t["JP"] for t in daftar) == 0:
+        dasar, sisa = divmod(target, len(daftar))
+        for i, t in enumerate(daftar):
+            t["JP"] = dasar + (1 if i < sisa else 0)
+        return True
+    return False
+
+
+def _ringkas_angka(angka) -> str:
+    angka = sorted(set(angka))
+    out, i = [], 0
+    while i < len(angka):
+        j = i
+        while j + 1 < len(angka) and angka[j + 1] == angka[j] + 1:
+            j += 1
+        out.append(str(angka[i]) if i == j else f"{angka[i]}-{angka[j]}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def _parse_minggu_efektif(tabel: list):
+    """Ubah tabel hasil tab Minggu Efektif menjadi daftar minggu bertanggal. None bila format tak terbaca."""
+    hasil = []
+    for m in tabel or []:
+        mm = re.search(r"(\d{1,2})\s+([A-Za-z]{3,4})\.?\s*-\s*(\d{1,2})\s+([A-Za-z]{3,4})\.?\s+(\d{4})",
+                       str(m.get("Minggu Ke", "")))
+        if not mm:
+            return None
+        b1 = _BULAN_DARI_SINGKAT.get(mm.group(2).lower()[:3])
+        b2 = _BULAN_DARI_SINGKAT.get(mm.group(4).lower()[:3])
+        if not b1 or not b2:
+            return None
+        try:
+            th = int(mm.group(5))
+            akhir = date(th, b2, int(mm.group(3)))
+            mulai = date(th if b1 <= b2 else th - 1, b1, int(mm.group(1)))
+        except ValueError:
+            return None
+        tengah = mulai + timedelta(days=3)      # bulan minggu = bulan pada hari Kamis
+        hasil.append({"no": m.get("No"), "mulai": mulai, "akhir": akhir, "status": m.get("Status", "Efektif"),
+                      "ket": m.get("Keterangan", "-"), "bulan": tengah.month})
+    return hasil or None
+
+
+def _minggu_perkiraan(semester: str, n: int) -> list:
+    """Cadangan bila belum ada hasil Analisis Minggu Efektif: n minggu efektif disebar rata ke bulan semester."""
+    bulan = _RENTANG_BULAN[semester]
+    n = max(1, int(n))
+    return [{"no": k, "mulai": None, "akhir": None, "status": "Efektif", "ket": "-",
+             "bulan": bulan[min(len(bulan) - 1, (k - 1) * len(bulan) // n)]} for k in range(1, n + 1)]
+
+
+def _fmt_periode(w: dict) -> str:
+    if not w.get("mulai"):
+        return "-"
+    a, b = w["mulai"], w["akhir"]
+    return f"{a.day:02d} {_BULAN_ID_SINGKAT[a.month - 1]} - {b.day:02d} {_BULAN_ID_SINGKAT[b.month - 1]} {b.year}"
+
+
+def susun_md_prota(tp_ganjil: list, tp_genap: list) -> str:
+    md = "# PROGRAM TAHUNAN (PROTA)\n\n## A. PROGRAM TAHUNAN\n\n"
+    md += "| No | Semester | Kode TP | Tujuan Pembelajaran | Alokasi Waktu (JP) | Keterangan |\n|---|---|---|---|---|---|\n"
+    no = 0
+    jml = {}
+    for sem, daftar in (("Ganjil", tp_ganjil), ("Genap", tp_genap)):
+        for tp in daftar:
+            no += 1
+            md += (f"| {no} | {sem} | {_sel_md(tp['Kode TP'])} | {_sel_md(tp['Tujuan Pembelajaran'])} | "
+                   f"{tp['JP']} | {_sel_md(tp['Keterangan']) or '-'} |\n")
+        jml[sem] = sum(t["JP"] for t in daftar)
+        if daftar:
+            md += f"| | | | Jumlah JP Semester {sem} | {jml[sem]} | |\n"
+    md += "\n## B. REKAPITULASI\n\n| Keterangan | Jumlah JP |\n|---|---|\n"
+    md += f"| Semester Ganjil | {jml['Ganjil']} |\n| Semester Genap | {jml['Genap']} |\n"
+    md += f"| Total Satu Tahun | {jml['Ganjil'] + jml['Genap']} |\n"
+    return md
+
+
+def susun_md_promes(semester: str, tp_list: list, minggu: list, jp_per_minggu: int, dari_kaldik: bool):
+    """Petakan TP (urut sesuai ATP) ke minggu EFEKTIF; tiap minggu berkapasitas jp_per_minggu JP.
+    Mengembalikan (markdown, info)."""
+    efektif = [w for w in minggu if w["status"] == "Efektif"]
+    cap = max(1, int(jp_per_minggu))
+    idx, sisa = 0, cap
+    peta, isi_minggu = [], {}
+    for tp in tp_list:
+        butuh, dipakai = tp["JP"], []
+        while butuh > 0 and idx < len(efektif):
+            w = efektif[idx]
+            ambil = min(butuh, sisa)
+            dipakai.append(w)
+            isi_minggu.setdefault(w["no"], []).append(tp["Kode TP"])
+            butuh -= ambil
+            sisa -= ambil
+            if sisa <= 0:
+                idx += 1
+                sisa = cap
+        peta.append((tp, dipakai, butuh))
+
+    md = f"# PROGRAM SEMESTER (PROMES) - SEMESTER {semester.upper()}\n\n## A. PEMETAAN TP KE MINGGU EFEKTIF\n\n"
+    md += "| No | Kode TP | Tujuan Pembelajaran | JP | Bulan | Minggu ke- | Keterangan |\n|---|---|---|---|---|---|---|\n"
+    kurang_total = 0
+    for n, (tp, dipakai, kurang) in enumerate(peta, 1):
+        bulan = ", ".join(_BULAN_ID[b - 1] for b in dict.fromkeys(w["bulan"] for w in dipakai)) or "-"
+        minggu_txt = _ringkas_angka([w["no"] for w in dipakai]) if dipakai else "-"
+        ket = _sel_md(tp["Keterangan"])
+        if kurang > 0:
+            kurang_total += kurang
+            ket = (ket + "; " if ket else "") + f"Kurang {kurang} JP (minggu efektif tidak cukup)"
+        md += (f"| {n} | {_sel_md(tp['Kode TP'])} | {_sel_md(tp['Tujuan Pembelajaran'])} | {tp['JP']} | "
+               f"{bulan} | {minggu_txt} | {ket or '-'} |\n")
+    total_jp = sum(t["JP"] for t in tp_list)
+    md += f"| | | Jumlah JP Semester {semester} | {total_jp} | | | |\n"
+
+    md += "\n## B. RINCIAN PER MINGGU\n\n| Minggu ke- | Periode | Bulan | Status | TP / Kegiatan |\n|---|---|---|---|---|\n"
+    kosong = 0
+    for w in minggu:
+        if w["status"] == "Efektif":
+            kode = list(dict.fromkeys(isi_minggu.get(w["no"], [])))
+            if kode:
+                isi = ", ".join(_sel_md(k) for k in kode)
+            else:
+                isi = "Cadangan (pengayaan / remedial)"
+                kosong += 1
+        else:
+            isi = _sel_md(w["ket"]) or "-"
+        md += (f"| {w['no']} | {_fmt_periode(w)} | {_BULAN_ID[w['bulan'] - 1]} | {w['status']} | {isi} |\n")
+
+    sumber = ("Analisis Minggu Efektif berdasarkan Kalender Pendidikan (KALDIK)" if dari_kaldik
+              else "perkiraan jumlah minggu efektif (belum memakai KALDIK)")
+    md += "\n## C. CATATAN\n\n"
+    md += f"- Alokasi waktu: {cap} JP per minggu efektif.\n- Sumber minggu efektif: {sumber}.\n"
+    md += "- TP disalin dari TP & ATP tanpa perubahan; minggu tidak efektif (libur, PTS, PAS, dll) tidak diisi TP.\n"
+    info = {"total_jp": total_jp, "kapasitas": len(efektif) * cap, "kurang": kurang_total,
+            "kosong": kosong, "minggu_efektif": len(efektif)}
+    return md, info
+
+
 with tab_prota:
     st.subheader("Susun Program Tahunan (PROTA) & Program Semester (PROMES)")
+    st.caption("TP pada PROTA & PROMES **disalin apa adanya** dari TP & ATP (tidak dibuat ulang oleh AI). "
+               "PROMES hanya memetakan TP tersebut ke minggu efektif.")
+    for _s in ("ganjil", "genap"):
+        st.session_state.setdefault(f"pp_tp_{_s}", _df_tp_kosong())
+        st.session_state.setdefault(f"pp_ver_{_s}", 0)
+
     c1, c2 = st.columns(2)
     with c1:
         pp_mapel = st.selectbox("Mata Pelajaran", SUBJECT_OPTIONS, key="pp_mapel")
@@ -3072,9 +3367,11 @@ with tab_prota:
     _total_minggu = pp_minggu_ganjil + pp_minggu_genap
     pp_jp_ganjil = round(pp_jp_tahun * pp_minggu_ganjil / _total_minggu)
     pp_jp_genap = pp_jp_tahun - pp_jp_ganjil
+    pp_jp_per_minggu = max(1, round(pp_jp_tahun / _total_minggu))
     st.caption(
         f"📊 Total **{pp_jp_tahun} JP/tahun** → perkiraan Semester Ganjil **{pp_jp_ganjil} JP**, "
-        f"Semester Genap **{pp_jp_genap} JP** (dibagi sesuai proporsi minggu efektif)."
+        f"Semester Genap **{pp_jp_genap} JP** (dibagi sesuai proporsi minggu efektif); "
+        f"alokasi per minggu **{pp_jp_per_minggu} JP**."
     )
 
     def _jp_params():
@@ -3114,133 +3411,149 @@ with tab_prota:
         st.caption("ℹ️ Isi URL Apps Script di sidebar (☁️ Simpan ke Google Sheet) agar JP bisa disimpan "
                    "permanen di akun Google Anda.")
 
-    pp_materi = st.text_area(
-        "Daftar Materi Pokok / TP satu tahun (bisa salin dari tab TP & ATP)",
-        height=150, key="pp_materi",
-        placeholder="Contoh:\nSemester Ganjil: Tata Cara Wudhu, Sholat Fardhu Berjamaah, Adab kepada Orang Tua\n"
-                    "Semester Genap: Puasa Ramadhan, Zakat Fitrah, Kisah Nabi",
-    )
-    pp_referensi = uploader_referensi("pp_referensi_upl",
-                                       "📎 Unggah Referensi Tambahan (Buku Guru/Materi/ATP, opsional)")
+    # ---------- 1. TP disalin dari TP & ATP ----------
+    st.markdown("#### 1️⃣ Salin TP dari TP & ATP")
 
+    def _pp_salin_cb(sumber: str, semester: str):
+        sem = semester.lower()
+        if sumber == "hasil":
+            daftar, pesan = tp_dari_markdown(st.session_state.hasil_tp_atp), ""
+        else:
+            f = st.session_state.get("pp_tp_upl")
+            daftar, pesan = tp_dari_berkas(f) if f is not None else ([], "Belum ada berkas diunggah.")
+        if not daftar:
+            st.session_state["_pesan_tp"] = ("err", f"❌ TP tidak terbaca. {pesan}".strip())
+            return
+        st.session_state[f"pp_tp_{sem}"] = pd.DataFrame(daftar, columns=_TP_COLS)
+        st.session_state[f"pp_ver_{sem}"] += 1
+        st.session_state["_pesan_tp"] = ("ok", f"✅ {len(daftar)} TP disalin ke Semester {semester}. "
+                                               "Tinjau/ubah JP di tabel di bawah bila perlu.")
+
+    _meta_tp = st.session_state.meta_tp_atp or {}
+    cs1, cs2 = st.columns(2)
+    with cs1:
+        st.markdown("**Dari hasil tab 🎯 TP & ATP**")
+        if st.session_state.hasil_tp_atp:
+            st.caption(f"Hasil terakhir: {_meta_tp.get('Mata Pelajaran', '-')} • {_meta_tp.get('Kelas', '-')} • "
+                       f"Semester {_meta_tp.get('Semester', '-')}")
+            if (_meta_tp.get("Mata Pelajaran") != pp_mapel) or (_meta_tp.get("Kelas") != label_kelas_fase(pp_kelas)):
+                st.warning("⚠️ Mapel/kelas hasil TP & ATP berbeda dari pilihan di atas. Pastikan sudah sesuai.")
+            _sem_tp = _meta_tp.get("Semester", "Ganjil")
+            _tujuan_hasil = st.selectbox("Salin ke semester", ["Ganjil", "Genap"],
+                                         index=1 if _sem_tp == "Genap" else 0, key=f"pp_tgt_hasil_{_sem_tp}")
+            st.button("📥 Salin TP dari Hasil TP & ATP", key="btn_pp_salin_hasil", on_click=_pp_salin_cb,
+                      args=("hasil", _tujuan_hasil), use_container_width=True)
+        else:
+            st.info("Belum ada hasil di tab 🎯 TP & ATP. Buat dulu di sana, atau unggah berkas TP & ATP di samping.")
+    with cs2:
+        st.markdown("**Atau unggah berkas TP & ATP (DOCX / CSV / XLSX)**")
+        _f_tp = st.file_uploader("Berkas TP & ATP (hasil download DOCX tab TP & ATP juga bisa)",
+                                 type=["docx", "csv", "xlsx", "xls"], key="pp_tp_upl")
+        _prev_tp = []
+        if _f_tp is not None:
+            _prev_tp, _pesan_baca = tp_dari_berkas(_f_tp)
+            if _prev_tp:
+                st.success(f"✅ {len(_prev_tp)} TP terbaca dari '{_f_tp.name}'.")
+            else:
+                st.warning(f"⚠️ {_pesan_baca or 'Tabel TP/ATP tidak terbaca.'} Pastikan ada kolom "
+                           "'Tujuan Pembelajaran' (opsional: Kode TP, Alokasi Waktu/JP).")
+        _tujuan_upl = st.selectbox("Salin ke semester", ["Ganjil", "Genap"], key="pp_tgt_upl")
+        st.button("📥 Salin TP dari Berkas", key="btn_pp_salin_upl", on_click=_pp_salin_cb,
+                  args=("upl", _tujuan_upl), disabled=not _prev_tp, use_container_width=True)
+
+    _ptp = st.session_state.pop("_pesan_tp", None)
+    if _ptp:
+        {"ok": st.success, "err": st.error}[_ptp[0]](_ptp[1])
+
+    st.caption("TP di tabel berikut adalah salinan dari TP & ATP. Kolom JP & Keterangan boleh disesuaikan; "
+               "baris bisa ditambah/dihapus.")
+    _cfg_tp = {
+        "Kode TP": st.column_config.TextColumn("Kode TP", width="small"),
+        "Tujuan Pembelajaran": st.column_config.TextColumn("Tujuan Pembelajaran", width="large"),
+        "JP": st.column_config.NumberColumn("JP", min_value=0, max_value=200, step=1, format="%d", width="small"),
+        "Keterangan": st.column_config.TextColumn("Keterangan", width="medium"),
+    }
+    _tp_edit = {}
+    _tab_g, _tab_n = st.tabs(["Semester Ganjil", "Semester Genap"])
+    for _sem, _tabw, _jp_alok in (("ganjil", _tab_g, pp_jp_ganjil), ("genap", _tab_n, pp_jp_genap)):
+        with _tabw:
+            _ed = st.data_editor(st.session_state[f"pp_tp_{_sem}"],
+                                 key=f"pp_ed_{_sem}_{st.session_state[f'pp_ver_{_sem}']}",
+                                 num_rows="dynamic", hide_index=True, use_container_width=True,
+                                 column_config=_cfg_tp)
+            _tp_edit[_sem] = _df_ke_daftar(_ed)
+            st.caption(f"{len(_tp_edit[_sem])} TP • total {sum(t['JP'] for t in _tp_edit[_sem])} JP "
+                       f"(alokasi semester dari Jumlah JP per Tahun: {_jp_alok} JP)")
+
+    # ---------- 2. Buat dokumen ----------
+    st.markdown("#### 2️⃣ Buat PROTA / PROMES")
     colA, colB = st.columns(2)
     with colA:
         gen_prota = st.button("🚀 Buat PROTA", key="btn_prota", use_container_width=True)
     with colB:
         pp_semester_promes = st.selectbox("Semester untuk PROMES", ["Ganjil", "Genap"], key="pp_semester_promes")
+        _me_cocok = bool(st.session_state.tabel_minggu_efektif) and \
+            (st.session_state.meta_minggu_efektif or {}).get("Semester") == pp_semester_promes
+        if _me_cocok:
+            st.caption("🗓️ PROMES memakai hasil tab **Minggu Efektif** (tanggal & minggu libur sebenarnya).")
+        else:
+            st.caption("ℹ️ Belum ada hasil tab **🗓️ Minggu Efektif** untuk semester ini, sehingga PROMES memakai "
+                       "perkiraan jumlah minggu efektif di atas. Hitung dulu di tab tersebut agar pemetaan "
+                       "mengikuti KALDIK.")
         gen_promes = st.button("🚀 Buat PROMES", key="btn_promes", use_container_width=True)
 
     if gen_prota or gen_promes:
-        if not groq_api_key:
-            st.error("⚠️ Mohon masukkan API Key Groq di sidebar terlebih dahulu.")
-        elif not pp_materi:
-            st.error("⚠️ Mohon isi Daftar Materi Pokok / TP satu tahun.")
+        _meta_dasar = {
+            "Satuan Pendidikan": st.session_state.sekolah,
+            "Mata Pelajaran": pp_mapel,
+            "Kelas": label_kelas_fase(pp_kelas),
+            "Tahun Ajaran": st.session_state.tahun_ajaran,
+            "Guru Penyusun": st.session_state.penyusun,
+            "NIP Guru": st.session_state.guru_nip,
+            "Kepala Sekolah": st.session_state.kepsek_nama,
+            "NIP Kepala Sekolah": st.session_state.kepsek_nip,
+        }
+        if gen_prota:
+            tp_g, tp_n = _tp_edit["ganjil"], _tp_edit["genap"]
+            if not tp_g and not tp_n:
+                st.error("⚠️ Belum ada TP. Salin dulu dari TP & ATP pada langkah 1.")
+            else:
+                if _isi_jp_bila_kosong(tp_g, pp_jp_ganjil) or _isi_jp_bila_kosong(tp_n, pp_jp_genap):
+                    st.info("ℹ️ JP pada TP belum terisi, sehingga dibagi rata sesuai alokasi semester.")
+                for _nm, _dft, _alok in (("Ganjil", tp_g, pp_jp_ganjil), ("Genap", tp_n, pp_jp_genap)):
+                    _jml = sum(t["JP"] for t in _dft)
+                    if _dft and _jml != _alok:
+                        st.warning(f"⚠️ Total JP TP Semester {_nm} = {_jml} JP, berbeda dari alokasi "
+                                   f"{_alok} JP (dari Jumlah JP per Tahun). PROTA mengikuti JP pada TP & ATP.")
+                st.session_state.hasil_prota_promes = susun_md_prota(tp_g, tp_n)
+                st.session_state.judul_prota_promes = "PROGRAM TAHUNAN (PROTA)"
+                st.session_state.meta_prota_promes = _meta_dasar
+                st.success("✨ PROGRAM TAHUNAN (PROTA) berhasil disusun!")
         else:
-            try:
-                if gen_prota:
-                    judul = "PROGRAM TAHUNAN (PROTA)"
-                    with st.spinner("Menyusun Program Tahunan (PROTA)..."):
-                        prompt = f"""
-Anda adalah Pakar Pengembang Kurikulum Merdeka di Indonesia.
-Susun PROGRAM TAHUNAN (PROTA) yang siap pakai untuk satu tahun ajaran penuh (2 semester).
-
-{ABCD_GUIDE}
-
-DATA INPUT:
-- Satuan Pendidikan: {st.session_state.sekolah}
-- Mata Pelajaran: {pp_mapel}
-- Kelas: {label_kelas_fase(pp_kelas)}
-- Tahun Ajaran: {st.session_state.tahun_ajaran}
-- Minggu Efektif Semester Ganjil: {pp_minggu_ganjil} minggu
-- Minggu Efektif Semester Genap: {pp_minggu_genap} minggu
-- Jumlah JP per Tahun: {pp_jp_tahun} JP (perkiraan Semester Ganjil {pp_jp_ganjil} JP, Semester Genap {pp_jp_genap} JP)
-- Daftar Materi Pokok / TP setahun: {pp_materi}
-{f"- REFERENSI TAMBAHAN dari guru (jadikan acuan bila relevan): {pp_referensi}" if pp_referensi else ""}
-
-FORMAT OUTPUT (Markdown, WAJIB rapi, gunakan tabel markdown dengan simbol |):
-
-# PROGRAM TAHUNAN (PROTA)
-
-## A. IDENTITAS
-Satuan pendidikan, mapel, kelas, tahun ajaran.
-
-## B. TABEL PROGRAM TAHUNAN
-Sajikan dalam TABEL markdown dengan kolom:
-| No | Semester | Materi Pokok / Tujuan Pembelajaran | Alokasi Waktu (JP) | Keterangan |
-Kolom "Materi Pokok / Tujuan Pembelajaran" diisi TP dalam format ABCD, hanya berdasarkan daftar materi/TP
-pada DATA INPUT (jangan menambah TP/materi baru); tulis singkat, satu kalimat per TP.
-Kelompokkan baris per semester (Ganjil dahulu, lalu Genap), jumlah seluruh alokasi waktu
-HARUS TEPAT {pp_jp_tahun} JP per tahun (Semester Ganjil {pp_jp_ganjil} JP dan Semester Genap {pp_jp_genap} JP),
-dibagi ke setiap materi secara proporsional dan realistis sesuai bobot materi. Sisihkan JP
-untuk penilaian (PTS/PAS) bila perlu, dan pastikan total akhir sama persis dengan {pp_jp_tahun} JP.
-
-## C. REKAPITULASI
-Tabel ringkas: total JP semester ganjil, total JP semester genap, total JP satu tahun
-(total satu tahun harus {pp_jp_tahun} JP).
-
-Gunakan Bahasa Indonesia resmi dan terstruktur rapi.
-"""
-                else:
-                    judul = f"PROGRAM SEMESTER (PROMES) - SEMESTER {pp_semester_promes.upper()}"
-                    minggu_pakai = pp_minggu_ganjil if pp_semester_promes == "Ganjil" else pp_minggu_genap
-                    jp_semester = pp_jp_ganjil if pp_semester_promes == "Ganjil" else pp_jp_genap
-                    bulan_range = "Juli - Desember" if pp_semester_promes == "Ganjil" else "Januari - Juni"
-                    with st.spinner(f"Menyusun Program Semester ({pp_semester_promes})..."):
-                        prompt = f"""
-Anda adalah Pakar Pengembang Kurikulum Merdeka di Indonesia.
-Susun PROGRAM SEMESTER (PROMES) yang siap pakai untuk semester {pp_semester_promes}.
-
-{ABCD_GUIDE}
-
-DATA INPUT:
-- Satuan Pendidikan: {st.session_state.sekolah}
-- Mata Pelajaran: {pp_mapel}
-- Kelas: {label_kelas_fase(pp_kelas)}
-- Tahun Ajaran: {st.session_state.tahun_ajaran}
-- Semester: {pp_semester_promes} (rentang bulan {bulan_range})
-- Minggu Efektif: {minggu_pakai} minggu
-- Jumlah JP per Tahun: {pp_jp_tahun} JP; alokasi untuk Semester {pp_semester_promes}: {jp_semester} JP
-- Daftar Materi Pokok / TP (ambil bagian yang relevan untuk semester {pp_semester_promes}): {pp_materi}
-{f"- REFERENSI TAMBAHAN dari guru (jadikan acuan bila relevan): {pp_referensi}" if pp_referensi else ""}
-
-FORMAT OUTPUT (Markdown, WAJIB rapi, gunakan tabel markdown dengan simbol |):
-
-# PROGRAM SEMESTER (PROMES) - SEMESTER {pp_semester_promes.upper()}
-
-## A. IDENTITAS
-Satuan pendidikan, mapel, kelas, tahun ajaran, semester, rentang bulan {bulan_range}.
-
-## B. TABEL PROGRAM SEMESTER
-Sajikan dalam TABEL markdown dengan kolom:
-| No | Materi Pokok / TP | Alokasi Waktu (JP) | Bulan & Minggu Pelaksanaan | Keterangan |
-Kolom "Materi Pokok / TP" diisi TP dalam format ABCD, hanya berdasarkan daftar materi/TP pada DATA INPUT
-(jangan menambah TP/materi baru); tulis singkat, satu kalimat per TP. Baris PTS/PAS tidak perlu format ABCD.
-Jumlah seluruh Alokasi Waktu (JP) pada tabel HARUS TEPAT {jp_semester} JP.
-Sebar materi secara realistis ke {minggu_pakai} minggu efektif dalam rentang {bulan_range},
-sisakan alokasi untuk Penilaian Tengah Semester (PTS) dan Penilaian Akhir Semester (PAS)
-sebagai baris tersendiri di tabel.
-
-## C. CATATAN
-Catatan singkat tentang hari libur/jeda semester yang perlu diperhitungkan guru.
-
-Gunakan Bahasa Indonesia resmi dan terstruktur rapi.
-"""
-                hasil = call_groq(groq_api_key, prompt)
+            tp_s = _tp_edit[pp_semester_promes.lower()]
+            if not tp_s:
+                st.error(f"⚠️ Belum ada TP untuk Semester {pp_semester_promes}. "
+                         "Salin dulu dari TP & ATP pada langkah 1.")
+            else:
+                _isi_jp_bila_kosong(tp_s, pp_jp_ganjil if pp_semester_promes == "Ganjil" else pp_jp_genap)
+                _minggu = _parse_minggu_efektif(st.session_state.tabel_minggu_efektif) if _me_cocok else None
+                _dari_kaldik = _minggu is not None
+                if not _dari_kaldik:
+                    _minggu = _minggu_perkiraan(pp_semester_promes,
+                                                pp_minggu_ganjil if pp_semester_promes == "Ganjil" else pp_minggu_genap)
+                hasil, info = susun_md_promes(pp_semester_promes, tp_s, _minggu, pp_jp_per_minggu, _dari_kaldik)
+                judul = f"PROGRAM SEMESTER (PROMES) - SEMESTER {pp_semester_promes.upper()}"
                 st.session_state.hasil_prota_promes = hasil
                 st.session_state.judul_prota_promes = judul
-                st.session_state.meta_prota_promes = {
-                    "Satuan Pendidikan": st.session_state.sekolah,
-                    "Mata Pelajaran": pp_mapel,
-                    "Kelas": label_kelas_fase(pp_kelas),
-                    "Tahun Ajaran": st.session_state.tahun_ajaran,
-                    "Guru Penyusun": st.session_state.penyusun,
-                    "NIP Guru": st.session_state.guru_nip,
-                    "Kepala Sekolah": st.session_state.kepsek_nama,
-                    "NIP Kepala Sekolah": st.session_state.kepsek_nip,
-                }
-                st.success(f"✨ {judul} berhasil disusun!")
-            except Exception as e:
-                st.error(f"❌ Terjadi kesalahan API Groq: {e}")
+                st.session_state.meta_prota_promes = {**_meta_dasar, "Semester": pp_semester_promes}
+                st.success(f"✨ {judul} berhasil disusun! ({info['total_jp']} JP dipetakan ke "
+                           f"{info['minggu_efektif']} minggu efektif)")
+                if info["kurang"] > 0:
+                    st.warning(f"⚠️ Minggu efektif tidak cukup: {info['kurang']} JP belum mendapat minggu "
+                               f"(kapasitas {info['kapasitas']} JP). Kurangi JP TP atau tambah minggu efektif.")
+                elif info["kosong"] > 0:
+                    st.info(f"ℹ️ Ada {info['kosong']} minggu efektif tanpa TP; ditandai sebagai cadangan "
+                            "(pengayaan/remedial).")
 
     if st.session_state.hasil_prota_promes:
         tampilkan_hasil(st.session_state.hasil_prota_promes)
