@@ -1707,6 +1707,21 @@ def susun_blok_semester(semester: str, md_semester_lain: str) -> str:
     return blok
 
 
+def susun_blok_topik_tp(topik: str, semester: str) -> str:
+    """Batas materi semester dari input guru (opsional) agar TP Ganjil & Genap tidak saling mirip."""
+    topik = (topik or "").strip()
+    if not topik:
+        return ""
+    lain = "Genap" if semester == "Ganjil" else "Ganjil"
+    return (
+        f"BATAS MATERI SEMESTER {semester.upper()} (WAJIB, dari input guru). Bab/Topik dan Sub Bab/Sub Topik berikut "
+        f"SATU-SATUNYA lingkup materi untuk TP & ATP Semester {semester}:\n{topik[:1500]}\n"
+        f"Rumuskan TP HANYA dari bab/topik di atas, usahakan setiap bab/topik terwakili minimal satu TP, "
+        f"dan jangan memasukkan materi Semester {lain} atau materi di luar daftar ini. "
+        f"Pada TP, sebut lingkup materi (bab/sub bab) secara konkret agar jelas berbeda dari semester lain."
+    )
+
+
 def susun_blok_tp(tp_input: str) -> str:
     """Susun aturan KETAT agar Modul Ajar hanya memakai TP yang diinput guru."""
     tp_input = (tp_input or "").strip()
@@ -2601,9 +2616,9 @@ with st.expander("☁️ Panduan Google Sheet (simpan Jurnal & JP ke akun Google
     )
     st.code(GAS_KODE_APPS_SCRIPT, language="javascript")
 
-tab_tp, tab_modul, tab_lkpd, tab_prota, tab_minggu, tab_jurnal, tab_absen = st.tabs(
+tab_tp, tab_modul, tab_lkpd, tab_prota, tab_minggu, tab_jurnal, tab_absen, tab_soal = st.tabs(
     ["🎯 TP & ATP", "📖 Modul Ajar", "📝 LKPD", "📅 PROTA & PROMES",
-     "🗓️ Minggu Efektif", "📔 Jurnal Mengajar", "🧑‍🤝‍🧑 Absensi Siswa"]
+     "🗓️ Minggu Efektif", "📔 Jurnal Mengajar", "🧑‍🤝‍🧑 Absensi Siswa", "🧪 Kisi-kisi & Soal"]
 )
 
 # ============================================================
@@ -2624,6 +2639,16 @@ with tab_tp:
             height=120, key="tp_cp",
         )
         tp_jumlah_tp = st.number_input("Perkiraan Jumlah TP yang diinginkan", 3, 20, 6)
+
+    tp_topik = st.text_area(
+        "Bab/Topik & Sub Bab/Sub Topik semester ini (opsional, sangat disarankan)",
+        placeholder="Satu bab per baris, sub bab dipisah titik koma. Contoh:\n"
+                    "Bab 5 Pecahan: pecahan senilai; membandingkan pecahan\n"
+                    "Bab 6 Bangun Ruang: sifat kubus dan balok",
+        height=110, key="tp_topik",
+        help="Isi sesuai materi semester yang dipilih di atas. Dengan ini TP Semester Genap tidak lagi mirip Semester Ganjil. "
+             "Kosongkan bila tidak diperlukan.",
+    )
 
     tp_referensi = uploader_referensi("tp_referensi_upl")
 
@@ -2655,6 +2680,7 @@ DATA INPUT:
 - Capaian Pembelajaran (CP) / Elemen: {tp_cp}
 - Target jumlah TP: sekitar {tp_jumlah_tp} tujuan
 {susun_blok_semester(tp_semester, _md_lain)}
+{susun_blok_topik_tp(tp_topik, tp_semester)}
 {f"- REFERENSI TAMBAHAN dari guru (jadikan acuan konteks/istilah bila relevan): {tp_referensi}" if tp_referensi else ""}
 
 FORMAT OUTPUT (Markdown, WAJIB rapi, gunakan tabel markdown dengan simbol | untuk ATP):
@@ -4480,3 +4506,249 @@ with sub_rekap:
                 st.download_button("⬇️ Unduh Rekap (Excel)", buf_excel.getvalue(),
                                     f"Rekap_Absen_{tahun_pilihan}-{bulan_pilihan:02d}.xlsx",
                                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# ============================================================
+# TAB 8 - KISI-KISI & NASKAH SOAL (Ulangan Harian / PTS / PAS)
+# ============================================================
+_JENIS_ASESMEN = {
+    "Ulangan Harian (UH)": ("ULANGAN HARIAN", "satu bab/TP atau beberapa TP yang baru selesai dipelajari"),
+    "Penilaian Tengah Semester (PTS)": ("PENILAIAN TENGAH SEMESTER (PTS)", "materi paruh pertama semester (sampai pertengahan semester)"),
+    "Penilaian Akhir Semester (PAS)": ("PENILAIAN AKHIR SEMESTER (PAS)", "seluruh materi semester berjalan, dengan sebaran merata antar bab"),
+}
+_KOMPOSISI_SOAL = {
+    "Seimbang (Mudah 30% - Sedang 50% - Sulit/HOTS 20%)": "Mudah (C1-C2) 30%, Sedang (C3) 50%, Sulit/HOTS (C4-C6) 20%",
+    "Dominan Mudah-Sedang (Mudah 40% - Sedang 50% - HOTS 10%)": "Mudah (C1-C2) 40%, Sedang (C3) 50%, Sulit/HOTS (C4-C6) 10%",
+    "Dominan HOTS (Mudah 20% - Sedang 40% - HOTS 40%)": "Mudah (C1-C2) 20%, Sedang (C3) 40%, Sulit/HOTS (C4-C6) 40%",
+}
+
+with tab_soal:
+    st.session_state.setdefault("hasil_kisi", "")
+    st.session_state.setdefault("meta_kisi", {})
+    st.session_state.setdefault("kunci_kisi", "")
+    st.session_state.setdefault("hasil_naskah", "")
+    st.session_state.setdefault("meta_naskah", {})
+
+    st.subheader("Susun Kisi-kisi & Naskah Soal")
+    st.caption("Untuk Ulangan Harian, PTS, maupun PAS. Buat **kisi-kisi** dulu, lalu **naskah soal + kunci jawaban** "
+               "akan mengikuti kisi-kisi tersebut. Keduanya juga bisa dibuat terpisah.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        s_jenis = st.selectbox("Jenis Penilaian", list(_JENIS_ASESMEN.keys()), key="s_jenis")
+        s_mapel = st.selectbox("Mata Pelajaran", SUBJECT_OPTIONS, key="s_mapel")
+        s_kelas = st.selectbox("Kelas (1-6)", KELAS_OPTIONS, key="s_kelas")
+        s_semester = st.selectbox("Semester", ["Ganjil", "Genap"], key="s_semester")
+    with c2:
+        s_materi = st.text_area(
+            "Materi / TP yang diujikan",
+            placeholder="Tempel TP atau tulis bab/materi yang diujikan, satu per baris. Contoh:\n"
+                        "Bab 5 Pecahan: pecahan senilai, membandingkan pecahan\n"
+                        "Bab 6 Bangun Ruang: sifat kubus dan balok",
+            height=150, key="s_materi",
+        )
+        s_waktu = st.number_input("Alokasi Waktu (menit)", 10, 240, 60, step=5, key="s_waktu")
+        s_komposisi = st.selectbox("Komposisi Tingkat Kesulitan", list(_KOMPOSISI_SOAL.keys()), key="s_komposisi")
+
+    st.markdown("**Jumlah Soal per Bentuk**")
+    c3, c4, c5 = st.columns(3)
+    with c3:
+        s_pg = st.number_input("Pilihan Ganda", 0, 40, 15, key="s_pg")
+    with c4:
+        s_isian = st.number_input("Isian Singkat", 0, 20, 5, key="s_isian")
+    with c5:
+        s_uraian = st.number_input("Uraian / Essay", 0, 10, 3, key="s_uraian")
+
+    s_referensi = uploader_referensi("s_referensi_upl", "📎 Unggah Referensi Materi/Buku Guru (opsional)")
+
+    _label_jenis, _cakupan_jenis = _JENIS_ASESMEN[s_jenis]
+    _total_soal = int(s_pg) + int(s_isian) + int(s_uraian)
+    _komposisi_teks = _KOMPOSISI_SOAL[s_komposisi]
+    _bentuk_teks = ", ".join(
+        f"{n} {b}" for n, b in [(int(s_pg), "Pilihan Ganda"), (int(s_isian), "Isian Singkat"), (int(s_uraian), "Uraian")] if n > 0
+    )
+    _kunci_pilihan = f"{s_jenis}|{s_mapel}|{s_kelas}|{s_semester}"
+    _kisi_cocok = bool(st.session_state.hasil_kisi) and st.session_state.kunci_kisi == _kunci_pilihan
+
+    def _validasi_soal():
+        if not groq_api_key:
+            return "⚠️ Mohon masukkan API Key Groq di sidebar terlebih dahulu."
+        if not s_materi.strip():
+            return "⚠️ Mohon isi Materi / TP yang diujikan."
+        if _total_soal == 0:
+            return "⚠️ Jumlah soal masih 0. Isi minimal satu bentuk soal."
+        return ""
+
+    _data_soal = f"""DATA INPUT:
+- Satuan Pendidikan: {st.session_state.sekolah}
+- Jenis Penilaian: {_label_jenis}
+- Mata Pelajaran: {s_mapel}
+- Kelas: {label_kelas_fase(s_kelas)}
+- Semester: {s_semester}
+- Tahun Ajaran: {st.session_state.tahun_ajaran}
+- Cakupan yang lazim untuk jenis ini: {_cakupan_jenis}
+- Materi / TP yang diujikan (SATU-SATUNYA lingkup soal, jangan menambah materi lain): {s_materi.strip()[:2500]}
+- Jumlah soal: {_bentuk_teks} (total {_total_soal} soal)
+- Komposisi tingkat kesulitan: {_komposisi_teks}
+- Alokasi waktu: {int(s_waktu)} menit
+{f"- REFERENSI TAMBAHAN dari guru (jadikan acuan isi bila relevan): {s_referensi}" if s_referensi else ""}"""
+
+    _meta_soal = {
+        "Satuan Pendidikan": st.session_state.sekolah,
+        "Mata Pelajaran": s_mapel,
+        "Kelas": label_kelas_fase(s_kelas),
+        "Semester": s_semester,
+        "Tahun Ajaran": st.session_state.tahun_ajaran,
+        "Jenis Penilaian": _label_jenis,
+        "Alokasi Waktu": f"{int(s_waktu)} menit",
+        "Jumlah Soal": _bentuk_teks,
+        "Guru Penyusun": st.session_state.penyusun,
+        "NIP Guru": st.session_state.guru_nip,
+    }
+
+    b1, b2 = st.columns(2)
+    with b1:
+        btn_kisi = st.button("📋 Buat Kisi-kisi", key="btn_kisi")
+    with b2:
+        btn_naskah = st.button("📝 Buat Naskah Soal + Kunci Jawaban", key="btn_naskah")
+
+    if _kisi_cocok:
+        st.caption("✅ Naskah soal akan mengikuti kisi-kisi yang sudah dibuat di bawah (jenis, mapel, kelas, semester sama).")
+    else:
+        st.caption("ℹ️ Belum ada kisi-kisi yang cocok. Naskah soal akan disusun langsung dari materi di atas.")
+
+    if btn_kisi:
+        _err = _validasi_soal()
+        if _err:
+            st.error(_err)
+        else:
+            try:
+                with st.spinner("Menyusun kisi-kisi soal..."):
+                    prompt = f"""
+Anda adalah guru senior dan pakar asesmen Kurikulum Merdeka di Indonesia.
+Susun KISI-KISI PENULISAN SOAL {_label_jenis} untuk murid Sekolah Dasar.
+
+{_data_soal}
+
+ATURAN WAJIB:
+- Kisi-kisi HANYA memuat materi/TP yang diinput guru. Jangan menambah atau memperluas materi.
+- Soal dinomori berurutan 1 sampai {_total_soal}: Pilihan Ganda lebih dulu, lalu Isian Singkat, lalu Uraian.
+  SETIAP nomor soal muncul tepat satu kali di kolom "No. Soal"; jumlah per bentuk harus sama persis dengan data input.
+- Satu baris kisi-kisi = satu indikator soal (boleh mencakup beberapa nomor soal dengan bentuk yang sama).
+- Indikator soal ditulis operasional, contoh: "Disajikan gambar bangun datar, murid dapat menentukan sifat-sifatnya."
+- Level kognitif memakai C1-C6 dan sebarannya mengikuti komposisi tingkat kesulitan di atas.
+- Sebaran materi merata sesuai cakupan jenis penilaian dan sesuai jenjang {label_kelas_fase(s_kelas)}.
+
+FORMAT OUTPUT (Markdown, rapi, tabel memakai simbol |):
+
+# KISI-KISI PENULISAN SOAL
+
+## A. TABEL KISI-KISI
+| No | Tujuan Pembelajaran / Materi | Indikator Soal | Level Kognitif | Bentuk Soal | No. Soal |
+|---|---|---|---|---|---|
+
+## B. REKAPITULASI SEBARAN SOAL
+Tabel jumlah soal per level kognitif (C1-C6) dikali bentuk soal, lengkap dengan baris dan kolom total.
+
+Gunakan Bahasa Indonesia baku dan isi sel ringkas agar tabel mudah dibaca.
+"""
+                    hasil = call_groq(groq_api_key, prompt, max_tokens=4500)
+                    st.session_state.hasil_kisi = hasil
+                    st.session_state.meta_kisi = dict(_meta_soal)
+                    st.session_state.kunci_kisi = _kunci_pilihan
+                st.success("✨ Kisi-kisi berhasil disusun!")
+            except Exception as e:
+                st.error(f"❌ Terjadi kesalahan API Groq: {e}")
+
+    if btn_naskah:
+        _err = _validasi_soal()
+        if _err:
+            st.error(_err)
+        else:
+            try:
+                with st.spinner("Menyusun naskah soal dan kunci jawaban..."):
+                    if _kisi_cocok:
+                        _blok_kisi = (
+                            "KISI-KISI YANG HARUS DIIKUTI PERSIS (nomor soal, indikator, level kognitif, dan bentuk soal "
+                            "tidak boleh diubah):\n" + st.session_state.hasil_kisi[:4500] + "\n"
+                        )
+                    else:
+                        _blok_kisi = (
+                            "Belum ada kisi-kisi: sebarkan soal merata pada materi di atas sesuai komposisi tingkat kesulitan.\n"
+                        )
+                    prompt = f"""
+Anda adalah guru senior dan pakar asesmen Kurikulum Merdeka di Indonesia.
+Susun NASKAH SOAL {_label_jenis} beserta KUNCI JAWABAN dan PEDOMAN PENSKORAN untuk murid Sekolah Dasar.
+
+{_data_soal}
+
+{_blok_kisi}
+ATURAN WAJIB:
+- Jumlah soal tiap bentuk harus sama persis dengan data input; nomor berurutan 1 sampai {_total_soal}
+  (Pilihan Ganda, lalu Isian Singkat, lalu Uraian). Bentuk yang jumlahnya 0 tidak perlu dibuat.
+- Soal HANYA dari materi/TP yang diinput guru, bahasa sesuai jenjang {label_kelas_fase(s_kelas)}, jelas, tidak ambigu.
+- Pilihan Ganda: Kelas 1-3 cukup opsi A-C, Kelas 4-6 opsi A-D; satu jawaban benar, pengecoh masuk akal,
+  posisi kunci tersebar merata.
+- Soal berlevel C4-C6 sebaiknya memakai konteks/stimulus singkat dari kehidupan sehari-hari murid.
+- Jangan membuat soal yang jawabannya bergantung pada gambar yang tidak tersedia; bila perlu gambar, tulis
+  *(Petunjuk ilustrasi untuk guru: ...)* sebelum soalnya.
+
+FORMAT OUTPUT (Markdown, rapi):
+
+# NASKAH SOAL {_label_jenis}
+
+Mapel, Kelas, Waktu, lalu kolom isian: Nama: __________  Kelas: ______  No. Absen: ______  Hari/Tanggal: __________
+
+## PETUNJUK UMUM
+3-5 butir petunjuk singkat dan ramah anak.
+
+## A. PILIHAN GANDA
+(bagian ini hanya bila ada soal pilihan ganda; beri petunjuk khusus satu kalimat)
+
+## B. ISIAN SINGKAT
+(hanya bila ada; sediakan garis titik-titik untuk jawaban)
+
+## C. URAIAN
+(hanya bila ada; sediakan garis titik-titik untuk jawaban)
+
+## KUNCI JAWABAN & PEDOMAN PENSKORAN (KHUSUS GURU)
+Pisahkan jelas dari naskah siswa. Sertakan:
+1. Tabel kunci Pilihan Ganda: | No | Kunci |
+2. Tabel jawaban Isian Singkat: | No | Jawaban |
+3. Tabel rubrik Uraian: | No | Kunci/Kriteria Jawaban | Skor |
+4. Tabel bobot skor per bentuk soal, skor maksimal, dan rumus Nilai Akhir = (skor diperoleh / skor maksimal) x 100.
+
+Gunakan Bahasa Indonesia baku.
+"""
+                    hasil = call_groq(groq_api_key, prompt, max_tokens=6000)
+                    st.session_state.hasil_naskah = hasil
+                    st.session_state.meta_naskah = dict(_meta_soal)
+                st.success("✨ Naskah soal berhasil disusun!")
+            except Exception as e:
+                st.error(f"❌ Terjadi kesalahan API Groq: {e}")
+
+    _nama_berkas = f"{s_mapel.replace(' ', '_')}_{s_kelas.replace(' ', '_')}_{s_jenis.split(' ')[0]}"
+
+    if st.session_state.hasil_kisi:
+        st.markdown("---")
+        st.markdown("### 📋 Kisi-kisi")
+        _m = st.session_state.meta_kisi
+        st.caption(f"{_m.get('Jenis Penilaian', '')} | {_m.get('Mata Pelajaran', '')} | {_m.get('Kelas', '')} | "
+                   f"Semester {_m.get('Semester', '')}")
+        tampilkan_hasil(st.session_state.hasil_kisi)
+        _judul_kisi = f"KISI-KISI PENULISAN SOAL {_m.get('Jenis Penilaian', '')}".strip()
+        download_row(f"Kisi-kisi_{_nama_berkas}",
+                     generate_pdf(_judul_kisi, _m, st.session_state.hasil_kisi),
+                     generate_docx(_judul_kisi, _m, st.session_state.hasil_kisi), "dl_kisi")
+
+    if st.session_state.hasil_naskah:
+        st.markdown("---")
+        st.markdown("### 📝 Naskah Soal & Kunci Jawaban")
+        _m = st.session_state.meta_naskah
+        st.caption(f"{_m.get('Jenis Penilaian', '')} | {_m.get('Mata Pelajaran', '')} | {_m.get('Kelas', '')} | "
+                   f"Semester {_m.get('Semester', '')}")
+        tampilkan_hasil(st.session_state.hasil_naskah)
+        _judul_soal = f"NASKAH SOAL {_m.get('Jenis Penilaian', '')}".strip()
+        download_row(f"Soal_{_nama_berkas}",
+                     generate_pdf(_judul_soal, _m, st.session_state.hasil_naskah),
+                     generate_docx(_judul_soal, _m, st.session_state.hasil_naskah), "dl_naskah")
