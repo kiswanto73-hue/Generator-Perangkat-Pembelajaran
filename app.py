@@ -4831,4 +4831,9 @@ with tab_soal_gambar:
             daftar_kelas=KELAS_OPTIONS,
             model=MODEL_GROQ,
             gas_kirim=gas_kirim,
+            sumber_awal=lambda: {
+                "mapel": st.session_state.get("s_mapel"),
+                "kelas": st.session_state.get("s_kelas"),
+                "materi": st.session_state.get("s_materi"),
+            },
         )
