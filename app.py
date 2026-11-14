@@ -2616,9 +2616,10 @@ with st.expander("☁️ Panduan Google Sheet (simpan Jurnal & JP ke akun Google
     )
     st.code(GAS_KODE_APPS_SCRIPT, language="javascript")
 
-tab_tp, tab_modul, tab_lkpd, tab_prota, tab_minggu, tab_jurnal, tab_absen, tab_soal = st.tabs(
+tab_tp, tab_modul, tab_lkpd, tab_prota, tab_minggu, tab_jurnal, tab_absen, tab_soal, tab_soal_gambar = st.tabs(
     ["🎯 TP & ATP", "📖 Modul Ajar", "📝 LKPD", "📅 PROTA & PROMES",
-     "🗓️ Minggu Efektif", "📔 Jurnal Mengajar", "🧑‍🤝‍🧑 Absensi Siswa", "🧪 Kisi-kisi & Soal"]
+     "🗓️ Minggu Efektif", "📔 Jurnal Mengajar", "🧑‍🤝‍🧑 Absensi Siswa", "🧪 Kisi-kisi & Soal",
+     "🖼️ Soal Bergambar"]
 )
 
 # ============================================================
@@ -4752,3 +4753,22 @@ Gunakan Bahasa Indonesia baku.
         download_row(f"Soal_{_nama_berkas}",
                      generate_pdf(_judul_soal, _m, st.session_state.hasil_naskah),
                      generate_docx(_judul_soal, _m, st.session_state.hasil_naskah), "dl_naskah")
+
+# ============================================================
+# TAB - SOAL STIMULUS BERGAMBAR (PG + gambar, ekspor PDF/Word)
+# Logika ada di modul_soal.py (satu folder dengan app.py).
+# ============================================================
+with tab_soal_gambar:
+    try:
+        import modul_soal
+    except Exception as _e_modul:
+        st.error(f"Modul soal bergambar belum siap: {_e_modul}. "
+                 "Pastikan file modul_soal.py dan library matplotlib sudah terpasang.")
+    else:
+        modul_soal.render_tab_soal(
+            api_key=groq_api_key,
+            sekolah=st.session_state.sekolah,
+            tahun_ajaran=st.session_state.tahun_ajaran,
+            daftar_mapel=SUBJECT_OPTIONS,
+            daftar_kelas=KELAS_OPTIONS,
+        )
