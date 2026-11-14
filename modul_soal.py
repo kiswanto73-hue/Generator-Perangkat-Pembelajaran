@@ -31,6 +31,7 @@ from PIL import Image
 BASE_DIR = Path(__file__).parent
 PUSTAKA_DIR = BASE_DIR / "pustaka_gambar"
 MODEL_DEFAULT = "openai/gpt-oss-120b"
+VERSI_MODUL = "14 Nov 2026 - jenis soal PG, isian, esai"
 
 # =====================================================================
 # 1. GAMBAR DARI KODE  (presisi: angka pada gambar = angka pada soal)
@@ -1195,6 +1196,7 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
     daftar_kelas = list(daftar_kelas or [f"Kelas {i}" for i in range(1, 7)])
 
     st.subheader("\U0001F4DD Generator Soal (UH / PTS / PAS)")
+    st.caption(f"Versi modul: {VERSI_MODUL}")
     st.session_state.setdefault("sg_soal_list", [])
     st.session_state.setdefault("sg_soal_uid", 0)
 
