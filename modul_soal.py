@@ -350,8 +350,9 @@ def parse_angka(teks):
     return float(m.group(0).replace(".", "").replace(",", "."))
 
 
-def verifikasi(s):
-    """Periksa struktur + kunci. Mengisi s['_status'] dan s['_catatan']; boleh memperbaiki kunci."""
+def verifikasi(s, perbaiki=True):
+    """Periksa struktur + kunci. Mengisi s['_status'] dan s['_catatan'].
+    perbaiki=True: kunci yang salah diganti otomatis; False: hanya diberi peringatan (dipakai saat guru mengedit)."""
     opsi = s.get("opsi", {})
     if sorted(opsi.keys()) != ["A", "B", "C", "D"] or any(not str(v).strip() for v in opsi.values()):
         s["_status"], s["_catatan"] = "gagal", "Pilihan jawaban harus lengkap A-D."
@@ -375,6 +376,10 @@ def verifikasi(s):
     cocok = [h for h, v in nilai.items() if v is not None and math.isclose(v, hasil, rel_tol=1e-6, abs_tol=1e-9)]
     if s["kunci"] in cocok:
         s["_status"], s["_catatan"] = "ok", f"Terverifikasi: hasil hitung = {_n(hasil)}."
+    elif len(cocok) == 1 and not perbaiki:
+        s["_status"] = "gagal"
+        s["_catatan"] = (f"Kunci {s['kunci']} tidak cocok dengan hasil hitung ({_n(hasil)}). "
+                         f"Pilihan yang cocok: {cocok[0]}.")
     elif len(cocok) == 1:
         lama = s["kunci"]
         s["kunci"] = cocok[0]
@@ -731,17 +736,22 @@ def _ambil_kunci_groq(st):
     return os.environ.get("GROQ_API_KEY")
 
 
-def render_tab_soal():
+def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None, daftar_kelas=None):
+    """api_key/sekolah/tahun_ajaran/daftar_mapel/daftar_kelas boleh diisi dari app induk (app KKG)."""
     import streamlit as st
+    daftar_mapel = list(daftar_mapel or MAPEL)
+    if "Lainnya" not in daftar_mapel:
+        daftar_mapel.append("Lainnya")
+    daftar_kelas = list(daftar_kelas or [f"Kelas {i}" for i in range(1, 7)])
 
     st.subheader("\U0001F4DD Generator Soal (UH / PTS / PAS)")
-    st.session_state.setdefault("soal_list", [])
-    st.session_state.setdefault("soal_uid", 0)
+    st.session_state.setdefault("sg_soal_list", [])
+    st.session_state.setdefault("sg_soal_uid", 0)
 
     c1, c2, c3 = st.columns(3)
     jenis = c1.selectbox("Jenis ujian", JENIS_UJIAN, key="sj_jenis")
-    kelas = c2.selectbox("Kelas", [1, 2, 3, 4, 5, 6], index=3, key="sj_kelas")
-    mapel = c3.selectbox("Mata pelajaran", MAPEL, key="sj_mapel")
+    kelas = c2.selectbox("Kelas", daftar_kelas, index=min(3, len(daftar_kelas) - 1), key="sj_kelas")
+    mapel = c3.selectbox("Mata pelajaran", daftar_mapel, key="sj_mapel")
     if mapel == "Lainnya":
         mapel = st.text_input("Nama mata pelajaran", key="sj_mapel_lain")
     materi = st.text_area("Materi / Bab (boleh lebih dari satu)", height=80, key="sj_materi",
@@ -752,18 +762,24 @@ def render_tab_soal():
 
     with st.expander("Kop soal & pengaturan"):
         k1, k2 = st.columns(2)
-        sekolah = k1.text_input("Nama sekolah", key="sj_sekolah")
-        tahun = k2.text_input("Tahun ajaran", placeholder="2026/2027", key="sj_tahun")
+        if not sekolah:
+            sekolah = k1.text_input("Nama sekolah", key="sj_sekolah")
+        else:
+            k1.caption(f"Sekolah: {sekolah} (dari pengaturan sidebar)")
+        if not tahun_ajaran:
+            tahun_ajaran = k2.text_input("Tahun ajaran", placeholder="2026/2027", key="sj_tahun")
+        else:
+            k2.caption(f"Tahun ajaran: {tahun_ajaran} (dari pengaturan sidebar)")
         waktu = k1.text_input("Waktu", placeholder="90 menit", key="sj_waktu")
         model = k2.text_input("Model Groq", MODEL_DEFAULT, key="sj_model")
 
     b1, b2 = st.columns([2, 1])
     if b1.button("\u2728 Generate soal", type="primary", use_container_width=True):
-        kunci_api = _ambil_kunci_groq(st)
+        kunci_api = api_key or _ambil_kunci_groq(st)
         if not materi.strip():
             st.warning("Isi materi/bab dulu.")
         elif not kunci_api:
-            st.error("GROQ_API_KEY belum diatur (st.secrets atau environment).")
+            st.error("API Key Groq belum diisi (isi di sidebar).")
         else:
             try:
                 from groq import Groq
@@ -772,18 +788,18 @@ def render_tab_soal():
                         Groq(api_key=kunci_api),
                         dict(jenis_ujian=jenis, kelas=kelas, mapel=mapel, materi=materi.strip(),
                              jumlah=int(jumlah), tingkat=tingkat), model=model)
-                st.session_state["soal_list"] = hasil
-                st.session_state["soal_uid"] += 1
+                st.session_state["sg_soal_list"] = hasil
+                st.session_state["sg_soal_uid"] += 1
             except Exception as e:
                 st.error(f"Gagal generate: {e}")
     if b2.button("Coba contoh (tanpa AI)", use_container_width=True):
-        st.session_state["soal_list"] = [normalisasi(dict(s)) for s in CONTOH_SOAL]
-        st.session_state["soal_uid"] += 1
+        st.session_state["sg_soal_list"] = [normalisasi(dict(s)) for s in CONTOH_SOAL]
+        st.session_state["sg_soal_uid"] += 1
 
-    soal = st.session_state["soal_list"]
+    soal = st.session_state["sg_soal_list"]
     if not soal:
         return
-    uid = st.session_state["soal_uid"]
+    uid = st.session_state["sg_soal_uid"]
     st.divider()
     st.markdown(f"**{len(soal)} soal** \u2014 periksa dan edit bila perlu.")
 
@@ -797,33 +813,33 @@ def render_tab_soal():
                 st.caption(s["_catatan"])
             kiri, kanan = st.columns([3, 1])
             with kiri:
-                s["stimulus"] = st.text_area("Stimulus", s["stimulus"], key=f"st_{k}", height=110)
-                s["pertanyaan"] = st.text_input("Pertanyaan", s["pertanyaan"], key=f"pt_{k}")
+                s["stimulus"] = st.text_area("Stimulus", s["stimulus"], key=f"sg_st_{k}", height=110)
+                s["pertanyaan"] = st.text_input("Pertanyaan", s["pertanyaan"], key=f"sg_pt_{k}")
                 for h in "ABCD":
-                    s["opsi"][h] = st.text_input(f"Pilihan {h}", s["opsi"][h], key=f"o{h}_{k}")
+                    s["opsi"][h] = st.text_input(f"Pilihan {h}", s["opsi"][h], key=f"sg_o{h}_{k}")
                 s["kunci"] = st.selectbox("Kunci jawaban", list("ABCD"),
                                           index="ABCD".index(s["kunci"]) if s["kunci"] in "ABCD" and s["kunci"] else 0,
-                                          key=f"kc_{k}")
-                s["pembahasan"] = st.text_area("Pembahasan", s["pembahasan"], key=f"pb_{k}", height=80)
+                                          key=f"sg_kc_{k}")
+                s["pembahasan"] = st.text_area("Pembahasan", s["pembahasan"], key=f"sg_pb_{k}", height=80)
             with kanan:
                 gb = gambar_untuk(s)
                 if gb:
                     st.image(gb, use_container_width=True)
                 else:
                     st.caption("Tanpa gambar")
-                up = st.file_uploader("Ganti gambar", type=["png", "jpg", "jpeg"], key=f"up_{k}")
+                up = st.file_uploader("Ganti gambar", type=["png", "jpg", "jpeg"], key=f"sg_up_{k}")
                 if up is not None:
                     s["_upload"] = up.getvalue()
-                s["_hapus_gambar"] = st.checkbox("Tanpa gambar", s.get("_hapus_gambar", False), key=f"hg_{k}")
+                s["_hapus_gambar"] = st.checkbox("Tanpa gambar", s.get("_hapus_gambar", False), key=f"sg_hg_{k}")
             # kunci diedit manual -> kunci dianggap pilihan guru; status dihitung ulang kecuali yang diperbaiki
-            verifikasi(s)
+            verifikasi(s, perbaiki=False)
 
     st.divider()
-    kop = dict(sekolah=sekolah, jenis_ujian=jenis, tahun_ajaran=tahun, mapel=mapel,
-               kelas=f"{kelas} (SD)", waktu=waktu)
+    kop = dict(sekolah=sekolah, jenis_ujian=jenis, tahun_ajaran=tahun_ajaran, mapel=mapel,
+               kelas=str(kelas), waktu=waktu)
     sertakan = st.checkbox("Sertakan halaman kunci jawaban & pembahasan", True)
     d1, d2 = st.columns(2)
-    nama = re.sub(r"[^A-Za-z0-9_-]+", "_", f"soal_{mapel}_kelas{kelas}")
+    nama = re.sub(r"[^A-Za-z0-9_-]+", "_", f"soal_{mapel}_{kelas}")
     try:
         d1.download_button("\u2B07\uFE0F Unduh PDF", buat_pdf(soal, kop, sertakan), f"{nama}.pdf",
                            "application/pdf", use_container_width=True)
