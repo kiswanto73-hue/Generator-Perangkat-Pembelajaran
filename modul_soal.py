@@ -524,6 +524,9 @@ def buat_prompt(p):
         f"- Jenis ujian : {p['jenis_ujian']}\n- Kelas       : {p['kelas']}\n"
         f"- Mapel       : {p['mapel']}\n- Materi/Bab  : {p['materi']}\n"
         f"- Jumlah soal : {p['jumlah']}\n- Tingkat     : {p['tingkat']}\n\n"
+        f"WAJIB: SEMUA soal harus membahas mata pelajaran {p['mapel']} untuk {p['kelas']} dengan materi: "
+        f"{p['materi']}. DILARANG membuat soal mata pelajaran lain (misalnya soal hitungan Matematika untuk "
+        "mapel non-Matematika) kecuali materi tersebut memang memuat hitungan.\n\n"
         "ATURAN:\n"
         "1. Bahasa Indonesia baku, panjang kalimat sesuai kelas (kelas 1-2: kalimat pendek dan sederhana).\n"
         "2. 'stimulus' = cerita/data singkat yang memuat SEMUA angka dan satuan yang dibutuhkan. "
@@ -532,9 +535,10 @@ def buat_prompt(p):
         "(titik ribuan, koma desimal), pilihan angka diurutkan naik, panjang pilihan seimbang.\n"
         "4. 'ekspresi_kunci': untuk soal hitungan, tulis ekspresi Python (hanya angka dengan TITIK desimal, "
         "operator + - * / dan kurung) yang hasilnya sama dengan nilai pilihan yang benar, dalam satuan yang sama "
-        "dengan pilihan tersebut. Untuk soal bukan hitungan isi null.\n"
+        "dengan pilihan tersebut. Untuk soal bukan hitungan (termasuk hampir semua soal IPAS, bahasa, agama) isi null.\n"
         "5. 'pembahasan' = langkah penyelesaian singkat.\n"
-        "6. " + GAMBAR_DOKUMEN + "\n\n"
+        "6. Gambar dari kode (bangun datar, diagram, jam, dst.) HANYA dipakai bila materinya memang membutuhkannya; "
+        "untuk mapel lain pakai \"pustaka\" bila perlu, atau null. " + GAMBAR_DOKUMEN + "\n\n"
         "Balas HANYA JSON valid dengan bentuk:\n"
         '{"soal":[{"stimulus":"...","pertanyaan":"...","opsi":{"A":"...","B":"...","C":"...","D":"..."},'
         '"kunci":"B","pembahasan":"...","ekspresi_kunci":null,"gambar":null}]}'
@@ -888,9 +892,10 @@ def _ambil_kunci_groq(st):
     return os.environ.get("GROQ_API_KEY")
 
 
-def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None, daftar_kelas=None, model=None, gas_kirim=None):
+def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None, daftar_kelas=None, model=None, gas_kirim=None, sumber_awal=None):
     """api_key/sekolah/tahun_ajaran/daftar_mapel/daftar_kelas/model/gas_kirim boleh diisi dari app induk (app KKG).
-    gas_kirim(aksi, payload) -> (ok, respons) : fungsi pengirim ke Apps Script milik guru."""
+    gas_kirim(aksi, payload) -> (ok, respons) : fungsi pengirim ke Apps Script milik guru.
+    sumber_awal() -> dict(mapel, kelas, materi) : isian tab lain yang bisa disalin ke sini."""
     import streamlit as st
     ss = st.session_state
     ss.setdefault("sg_pg_meta", [])
@@ -956,6 +961,17 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
                                lambda gid: sheet_ambil_gambar(gas_kirim, gid, ss["sg_pg_cache"]),
                                ss["sg_pg_versi"])
 
+    if sumber_awal:
+        def _salin():
+            v = sumber_awal() or {}
+            if v.get("mapel") in daftar_mapel:
+                ss["sj_mapel"] = v["mapel"]
+            if v.get("kelas") in daftar_kelas:
+                ss["sj_kelas"] = v["kelas"]
+            if str(v.get("materi") or "").strip():
+                ss["sj_materi"] = v["materi"]
+        st.button("\u21AA\uFE0F Ambil mapel, kelas & materi dari tab Kisi-kisi & Soal", key="sg_salin", on_click=_salin)
+
     c1, c2, c3 = st.columns(3)
     jenis = c1.selectbox("Jenis ujian", JENIS_UJIAN, key="sj_jenis")
     kelas = c2.selectbox("Kelas", daftar_kelas, index=min(3, len(daftar_kelas) - 1), key="sj_kelas")
@@ -1001,17 +1017,26 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
                              jumlah=int(jumlah), tingkat=tingkat), model=model)
                 st.session_state["sg_soal_list"] = hasil
                 st.session_state["sg_soal_uid"] += 1
+                st.session_state["sg_meta"] = {"mapel": mapel, "kelas": str(kelas), "jenis": jenis, "materi": materi.strip()}
             except Exception as e:
                 st.error(f"Gagal generate: {e}")
-    if b2.button("Coba contoh (tanpa AI)", use_container_width=True):
+    if b2.button("Contoh Matematika (tanpa AI)", use_container_width=True):
         st.session_state["sg_soal_list"] = [normalisasi(dict(s)) for s in CONTOH_SOAL]
         st.session_state["sg_soal_uid"] += 1
+        st.session_state["sg_meta"] = {"contoh": True}
 
     soal = st.session_state["sg_soal_list"]
     if not soal:
         return
     uid = st.session_state["sg_soal_uid"]
     st.divider()
+    meta_gen = st.session_state.get("sg_meta") or {}
+    if meta_gen.get("contoh"):
+        st.info("Ini hanya CONTOH soal Matematika untuk mencoba tampilan, bukan hasil AI sesuai pilihan Anda. "
+                "Klik Generate soal untuk membuat soal sesuai mapel dan materi.")
+    elif meta_gen:
+        st.caption(f"Dibuat untuk: {meta_gen['mapel']} \u2022 {meta_gen['kelas']} \u2022 {meta_gen['jenis']} "
+                   f"\u2022 Materi: {meta_gen['materi'][:120]}")
     st.markdown(f"**{len(soal)} soal** \u2014 periksa dan edit bila perlu.")
 
     for i, s in enumerate(soal):
