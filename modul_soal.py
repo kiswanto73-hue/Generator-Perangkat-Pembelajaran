@@ -28,7 +28,7 @@ from PIL import Image
 
 BASE_DIR = Path(__file__).parent
 PUSTAKA_DIR = BASE_DIR / "pustaka_gambar"
-MODEL_DEFAULT = "llama-3.3-70b-versatile"
+MODEL_DEFAULT = "openai/gpt-oss-120b"
 
 # =====================================================================
 # 1. GAMBAR DARI KODE  (presisi: angka pada gambar = angka pada soal)
@@ -442,18 +442,61 @@ def _ambil_json(teks):
         return json.loads(m.group(0))
 
 
+BATCH_SOAL = 5  # soal per panggilan: menjaga jawaban tidak terpotong dan hemat token per menit
+
+
+def _panggil_groq(client, model, pesan, max_token=5000):
+    """Satu panggilan Groq. Coba lagi bila kena batas token/menit atau format JSON ditolak model."""
+    import time
+    pakai_json = True
+    coba_max = max_token
+    err = None
+    for percobaan in range(4):
+        try:
+            kw = dict(model=model, messages=pesan, temperature=0.4, max_completion_tokens=coba_max)
+            if pakai_json:
+                kw["response_format"] = {"type": "json_object"}
+            resp = client.chat.completions.create(**kw)
+            isi = resp.choices[0].message.content or ""
+            if not isi.strip():
+                raise ValueError("Jawaban AI kosong (kemungkinan token habis).")
+            return isi
+        except Exception as e:
+            err = e
+            teks = str(e)
+            if "response_format" in teks or "json_validate_failed" in teks or "json_object" in teks:
+                pakai_json = False
+                continue
+            if "rate_limit" in teks or "tokens per minute" in teks or "Request too large" in teks:
+                coba_max = max(1500, coba_max // 2)
+                time.sleep(12)
+                continue
+            raise
+    raise RuntimeError(f"Groq menolak permintaan berulang kali. Detail: {err}")
+
+
 def generate_soal_ai(client, p, model=MODEL_DEFAULT):
-    resp = client.chat.completions.create(
-        model=model, temperature=0.4,
-        response_format={"type": "json_object"},
-        messages=[
+    """Membuat soal per batch (maks BATCH_SOAL) lalu menggabungkan dan memverifikasi."""
+    total = int(p["jumlah"])
+    hasil = []
+    while len(hasil) < total:
+        n = min(BATCH_SOAL, total - len(hasil))
+        pp = dict(p, jumlah=n)
+        prompt = buat_prompt(pp)
+        if hasil:
+            prompt += ("\n\nSoal yang SUDAH dibuat (jangan diulang, gunakan konteks dan angka berbeda):\n- "
+                       + "\n- ".join(h["pertanyaan"][:90] for h in hasil))
+        pesan = [
             {"role": "system", "content": "Kamu guru SD berpengalaman dan penyusun soal asesmen. "
                                           "Keluarkan hanya JSON valid, tanpa teks lain."},
-            {"role": "user", "content": buat_prompt(p)},
-        ],
-    )
-    data = _ambil_json(resp.choices[0].message.content)
-    return [normalisasi(s) for s in data.get("soal", [])]
+            {"role": "user", "content": prompt},
+        ]
+        data = _ambil_json(_panggil_groq(client, model, pesan))
+        baru = [normalisasi(s) for s in data.get("soal", [])][:n]
+        if not baru:
+            raise ValueError("AI tidak menghasilkan soal. Coba lagi atau persingkat materi.")
+        hasil.extend(baru)
+    return hasil
 
 
 CONTOH_SOAL = [
@@ -736,7 +779,7 @@ def _ambil_kunci_groq(st):
     return os.environ.get("GROQ_API_KEY")
 
 
-def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None, daftar_kelas=None):
+def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None, daftar_kelas=None, model=None):
     """api_key/sekolah/tahun_ajaran/daftar_mapel/daftar_kelas boleh diisi dari app induk (app KKG)."""
     import streamlit as st
     daftar_mapel = list(daftar_mapel or MAPEL)
@@ -771,7 +814,10 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
         else:
             k2.caption(f"Tahun ajaran: {tahun_ajaran} (dari pengaturan sidebar)")
         waktu = k1.text_input("Waktu", placeholder="90 menit", key="sj_waktu")
-        model = k2.text_input("Model Groq", MODEL_DEFAULT, key="sj_model")
+        if not model:
+            model = k2.text_input("Model Groq", MODEL_DEFAULT, key="sj_model")
+        else:
+            k2.caption(f"Model AI: {model} (sama dengan tab lain)")
 
     b1, b2 = st.columns([2, 1])
     if b1.button("\u2728 Generate soal", type="primary", use_container_width=True):
