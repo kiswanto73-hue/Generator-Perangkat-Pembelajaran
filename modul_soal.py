@@ -459,7 +459,7 @@ def parse_angka(teks):
     return float(m.group(0).replace(".", "").replace(",", "."))
 
 
-def verifikasi(s, perbaiki=True):
+def _verifikasi_pg(s, perbaiki=True):
     """Periksa struktur + kunci. Mengisi s['_status'] dan s['_catatan'].
     perbaiki=True: kunci yang salah diganti otomatis; False: hanya diberi peringatan (dipakai saat guru mengedit)."""
     opsi = s.get("opsi", {})
@@ -501,17 +501,99 @@ def verifikasi(s, perbaiki=True):
     return s
 
 
-def normalisasi(s):
-    opsi = s.get("opsi") or {}
+NAMA_TIPE = {"PG": "Pilihan Ganda", "ISIAN": "Isian Singkat", "ESAI": "Esai (Uraian)"}
+LABEL_TIPE = {"PG": "PG", "ISIAN": "ISIAN", "ESAI": "ESAI"}
+URUT_TIPE = ("PG", "ISIAN", "ESAI")
+BATCH_TIPE = {"PG": 5, "ISIAN": 5, "ESAI": 3}  # soal per panggilan AI
+BAGIAN = {
+    "PG": ("PILIHAN GANDA", "Pilihlah jawaban yang paling tepat dengan memberi tanda silang (X) pada huruf A, B, C, atau D!"),
+    "ISIAN": ("ISIAN SINGKAT", "Isilah titik-titik berikut dengan jawaban yang benar!"),
+    "ESAI": ("ESAI", "Jawablah pertanyaan berikut dengan jelas dan benar!"),
+}
+
+
+def _angka_semua(teks):
+    return [float(x.replace(".", "").replace(",", ".")) for x in _RE_ANGKA.findall(str(teks))]
+
+
+def _verifikasi_isian(s):
+    jw = str(s.get("jawaban", "")).strip()
+    if not jw:
+        s["_status"], s["_catatan"] = "gagal", "Kunci jawaban isian belum diisi."
+        return s
+    ek = s.get("ekspresi_kunci")
+    if not ek:
+        s["_status"], s["_catatan"] = "tanpa_cek", "Isian bukan hitungan: periksa kunci secara manual."
+        return s
+    try:
+        hasil = hitung_aman(ek)
+    except Exception:
+        s["_status"], s["_catatan"] = "tanpa_cek", "Ekspresi hitung tidak bisa dibaca: periksa manual."
+        return s
+    ang = parse_angka(jw)
+    if ang is None:
+        s["_status"], s["_catatan"] = "tanpa_cek", "Jawaban bukan angka: periksa manual."
+    elif math.isclose(ang, hasil, rel_tol=1e-6, abs_tol=1e-9):
+        s["_status"], s["_catatan"] = "ok", f"Terverifikasi: hasil hitung = {_n(hasil)}."
+    else:
+        s["_status"] = "gagal"
+        s["_catatan"] = f"Hasil hitung = {_n(hasil)} tetapi kunci tertulis '{jw}'. Perbaiki kunci jawaban."
+    return s
+
+
+def _verifikasi_esai(s):
+    if not str(s.get("jawaban", "")).strip() or not str(s.get("pedoman", "")).strip():
+        s["_status"], s["_catatan"] = "gagal", "Kunci jawaban dan pedoman penskoran esai harus diisi."
+        return s
+    ek = s.get("ekspresi_kunci")
+    if ek:
+        try:
+            hasil = hitung_aman(ek)
+            if any(math.isclose(a, hasil, rel_tol=1e-6, abs_tol=1e-9) for a in _angka_semua(s["jawaban"])):
+                s["_status"], s["_catatan"] = "ok", f"Terverifikasi: hasil akhir {_n(hasil)} ada pada kunci jawaban."
+            else:
+                s["_status"] = "gagal"
+                s["_catatan"] = f"Hasil hitung = {_n(hasil)} tidak ditemukan pada kunci jawaban. Periksa kunci."
+            return s
+        except Exception:
+            pass
+    s["_status"], s["_catatan"] = "tanpa_cek", "Esai: periksa kunci jawaban dan pedoman penskoran secara manual."
+    return s
+
+
+def verifikasi(s, perbaiki=True):
+    tipe = s.get("tipe", "PG")
+    if tipe == "ISIAN":
+        return _verifikasi_isian(s)
+    if tipe == "ESAI":
+        return _verifikasi_esai(s)
+    return _verifikasi_pg(s, perbaiki)
+
+
+def normalisasi(s, tipe=None):
+    tipe = str(tipe or s.get("tipe") or "PG").upper()
+    if tipe not in LABEL_TIPE:
+        tipe = "PG"
     out = {
+        "tipe": tipe,
         "stimulus": str(s.get("stimulus") or "").strip(),
         "pertanyaan": str(s.get("pertanyaan") or "").strip(),
-        "opsi": {h: str(opsi.get(h, "")).strip() for h in "ABCD"},
-        "kunci": str(s.get("kunci") or "").strip().upper()[:1],
         "pembahasan": str(s.get("pembahasan") or "").strip(),
         "ekspresi_kunci": s.get("ekspresi_kunci") or None,
         "gambar": s.get("gambar") if isinstance(s.get("gambar"), dict) else None,
     }
+    if tipe == "PG":
+        opsi = s.get("opsi") or {}
+        out["opsi"] = {h: str(opsi.get(h, "")).strip() for h in "ABCD"}
+        out["kunci"] = str(s.get("kunci") or "").strip().upper()[:1]
+    else:
+        out["jawaban"] = str(s.get("jawaban") or "").strip()
+        if tipe == "ESAI":
+            out["pedoman"] = str(s.get("pedoman") or "").strip()
+            try:
+                out["skor"] = max(1, min(20, int(float(s.get("skor") or 4))))
+            except (TypeError, ValueError):
+                out["skor"] = 4
     return verifikasi(out)
 
 # =====================================================================
@@ -544,11 +626,21 @@ def _petunjuk_mapel(mapel):
     return "Soal harus murni materi mata pelajaran ini dan BUKAN soal hitungan Matematika."
 
 
-def buat_prompt(p):
+_BENTUK = {
+    "PG": '{"soal":[{"stimulus":"...","pertanyaan":"...","opsi":{"A":"...","B":"...","C":"...","D":"..."},'
+          '"kunci":"B","pembahasan":"...","ekspresi_kunci":null,"gambar":null}]}',
+    "ISIAN": '{"soal":[{"stimulus":"...","pertanyaan":"... ..... ...","jawaban":"...","pembahasan":"...",'
+             '"ekspresi_kunci":null,"gambar":null}]}',
+    "ESAI": '{"soal":[{"stimulus":"...","pertanyaan":"...","jawaban":"...","pedoman":"...","skor":4,'
+            '"ekspresi_kunci":null,"gambar":null}]}',
+}
+
+
+def buat_prompt(p, tipe="PG"):
     mat = _mapel_matematika(p["mapel"])
     kepala = (
-        "Buatkan soal pilihan ganda untuk siswa SD sesuai Kurikulum Merdeka.\n"
-        f"- Jenis ujian : {p['jenis_ujian']}\n- Kelas       : {p['kelas']}\n"
+        f"Buatkan soal {NAMA_TIPE[tipe].lower()} untuk siswa SD sesuai Kurikulum Merdeka.\n"
+        f"- Jenis ujian : {p['jenis_ujian']}\n- Jenis soal  : {NAMA_TIPE[tipe]}\n- Kelas       : {p['kelas']}\n"
         f"- Mapel       : {p['mapel']}\n- Materi/Bab  : {p['materi']}\n"
         f"- Jumlah soal : {p['jumlah']}\n- Tingkat     : {p['tingkat']}\n\n"
         f"WAJIB: SEMUA soal harus membahas mata pelajaran {p['mapel']} untuk {p['kelas']} dengan materi: "
@@ -558,36 +650,54 @@ def buat_prompt(p):
     )
     if not mat:
         kepala += "Panduan mapel: " + _petunjuk_mapel(p["mapel"]) + "\n"
-    if mat:
-        aturan = (
-            "1. Bahasa Indonesia baku, panjang kalimat sesuai kelas (kelas 1-2: kalimat pendek dan sederhana).\n"
-            "2. 'stimulus' = cerita/data singkat yang memuat SEMUA angka dan satuan yang dibutuhkan. "
-            "'pertanyaan' = satu kalimat tanya.\n"
-            "3. Empat pilihan A-D, hanya satu benar. Pengecoh berupa kesalahan umum siswa. Tulis angka gaya Indonesia "
-            "(titik ribuan, koma desimal), pilihan angka diurutkan naik, panjang pilihan seimbang.\n"
-            "4. 'ekspresi_kunci': untuk soal hitungan, tulis ekspresi Python (hanya angka dengan TITIK desimal, "
-            "operator + - * / dan kurung) yang hasilnya sama dengan nilai pilihan yang benar, dalam satuan yang sama "
-            "dengan pilihan tersebut. Untuk soal bukan hitungan isi null.\n"
-            "5. 'pembahasan' = langkah penyelesaian singkat.\n"
-            "6. Gambar dari kode (bangun datar, diagram, jam, dst.) HANYA dipakai bila materinya memang membutuhkannya. "
-            + GAMBAR_DOKUMEN + "\n\n"
-        )
+    angka_id = " Tulis angka gaya Indonesia (titik ribuan, koma desimal)." if mat else ""
+    aturan = ["Bahasa Indonesia baku, panjang kalimat sesuai kelas (kelas 1-2: kalimat pendek dan sederhana)."]
+    if tipe == "PG":
+        if mat:
+            aturan += ["'stimulus' = cerita/data singkat yang memuat SEMUA angka dan satuan yang dibutuhkan. "
+                       "'pertanyaan' = satu kalimat tanya.",
+                       "Empat pilihan A-D, hanya satu benar. Pengecoh berupa kesalahan umum siswa." + angka_id +
+                       " Pilihan angka diurutkan naik, panjang pilihan seimbang."]
+        else:
+            aturan += ["'stimulus' = teks/pengamatan/data singkat yang memuat informasi yang dibutuhkan untuk menjawab. "
+                       "'pertanyaan' = satu kalimat tanya.",
+                       "Empat pilihan A-D, hanya satu benar. Pengecoh berupa miskonsepsi yang masuk akal, "
+                       "panjang pilihan seimbang."]
+        aturan.append("'pembahasan' = " + ("langkah penyelesaian singkat." if mat else "alasan jawaban benar, singkat."))
+    elif tipe == "ISIAN":
+        aturan += ["'stimulus' = " + ("cerita/data singkat yang memuat SEMUA angka dan satuan yang dibutuhkan."
+                                      if mat else "teks/pengamatan/data singkat yang memuat informasi yang dibutuhkan."),
+                   "'pertanyaan' memuat titik-titik (.....) sebagai tempat jawaban, atau kalimat tanya yang "
+                   "jawabannya singkat. Jangan membuat pilihan A-D.",
+                   "'jawaban' = jawaban singkat saja (satu kata, angka, atau frasa pendek, maksimal 4 kata). "
+                   "Hanya SATU jawaban yang benar dan tidak ambigu." + angka_id,
+                   "'pembahasan' = alasan atau langkah singkat."]
     else:
-        aturan = (
-            "1. Bahasa Indonesia baku, panjang kalimat sesuai kelas (kelas 1-2: kalimat pendek dan sederhana).\n"
-            "2. 'stimulus' = teks/pengamatan/data singkat yang memuat informasi yang dibutuhkan untuk menjawab. "
-            "'pertanyaan' = satu kalimat tanya.\n"
-            "3. Empat pilihan A-D, hanya satu benar. Pengecoh berupa miskonsepsi yang masuk akal, panjang pilihan seimbang.\n"
-            "4. 'ekspresi_kunci' WAJIB null (ini bukan soal hitungan).\n"
-            "5. 'pembahasan' = alasan jawaban benar, singkat.\n"
-            "6. Gambar: pakai {\"jenis\":\"pustaka\",\"objek\":[...]} untuk benda/hewan/tumbuhan/tempat bila membantu, "
-            "{\"jenis\":\"diagram_batang\",...} bila ada data tabel/grafik, selain itu null. Jangan memaksakan gambar. "
-            "Jangan menulis teks apa pun di dalam gambar.\n\n"
-        )
-    return (kepala + "\nATURAN:\n" + aturan +
-            "Balas HANYA JSON valid dengan bentuk:\n"
-            '{"soal":[{"stimulus":"...","pertanyaan":"...","opsi":{"A":"...","B":"...","C":"...","D":"..."},'
-            '"kunci":"B","pembahasan":"...","ekspresi_kunci":null,"gambar":null}]}')
+        aturan += ["'stimulus' = " + ("cerita/data singkat yang memuat SEMUA angka dan satuan yang dibutuhkan."
+                                      if mat else "teks/pengamatan/data singkat yang memuat informasi yang dibutuhkan."),
+                   "'pertanyaan' menuntut penjelasan atau penalaran (mengapa, jelaskan, bagaimana)"
+                   + (" atau penyelesaian bertahap (hitunglah dengan langkah-langkahnya)" if mat else "")
+                   + ". Kelas 1-2: cukup jawaban 1-2 kalimat.",
+                   "'jawaban' = kunci jawaban lengkap." + angka_id,
+                   "'pedoman' = pedoman penskoran rinci, skor per komponen, contoh: "
+                   "'Menyebutkan penyebab (1); memberi alasan (2); kesimpulan benar (1)'. "
+                   "Jumlah skor komponen HARUS sama dengan 'skor'.",
+                   "'skor' = bilangan bulat 2 sampai 6 sesuai bobot soal."]
+    if mat:
+        aturan.append("'ekspresi_kunci': untuk soal hitungan, tulis ekspresi Python (hanya angka dengan TITIK desimal, "
+                      "operator + - * / dan kurung) yang hasilnya sama dengan nilai jawaban akhir "
+                      + {"PG": "pada pilihan yang benar", "ISIAN": "pada 'jawaban'",
+                         "ESAI": "yang tertulis pada 'jawaban'"}[tipe]
+                      + ", dalam satuan yang sama. Untuk soal bukan hitungan isi null.")
+        aturan.append("Gambar dari kode (bangun datar, diagram, jam, dst.) HANYA dipakai bila materinya memang "
+                      "membutuhkannya. " + GAMBAR_DOKUMEN)
+    else:
+        aturan.append("'ekspresi_kunci' WAJIB null (ini bukan soal hitungan).")
+        aturan.append("Gambar: pakai {\"jenis\":\"pustaka\",\"objek\":[...]} untuk benda/hewan/tumbuhan/tempat bila "
+                      "membantu, {\"jenis\":\"diagram_batang\",...} bila ada data tabel/grafik, selain itu null. "
+                      "Jangan memaksakan gambar. Jangan menulis teks apa pun di dalam gambar.")
+    teks_aturan = "".join(f"{i}. {a}\n" for i, a in enumerate(aturan, 1))
+    return (kepala + "\nATURAN:\n" + teks_aturan + "\nBalas HANYA JSON valid dengan bentuk:\n" + _BENTUK[tipe])
 
 
 _RE_HITUNG = re.compile(r"keliling|luas (persegi|segitiga|lingkaran|trapesium|bangun|tanah|lahan)|kecepatan rata|"
@@ -601,7 +711,13 @@ def kemungkinan_salah_mapel(s, mapel):
         return False
     if s.get("ekspresi_kunci"):
         return True
-    semua_angka = all(_RE_OPSI_ANGKA.match(str(v)) for v in s.get("opsi", {}).values())
+    tipe = s.get("tipe", "PG")
+    if tipe == "PG":
+        semua_angka = all(_RE_OPSI_ANGKA.match(str(v)) for v in s.get("opsi", {}).values())
+    elif tipe == "ISIAN":
+        semua_angka = bool(_RE_OPSI_ANGKA.match(str(s.get("jawaban", ""))))
+    else:
+        return False
     teks = f"{s.get('stimulus', '')} {s.get('pertanyaan', '')}"
     return bool(semua_angka and _RE_HITUNG.search(teks))
 
@@ -649,9 +765,9 @@ def _panggil_groq(client, model, pesan, max_token=5000):
     raise RuntimeError(f"Groq menolak permintaan berulang kali. Detail: {err}")
 
 
-def _minta_soal(client, model, p, n, sudah, tegas=False):
+def _minta_soal(client, model, p, n, sudah, tipe="PG", tegas=False):
     pp = dict(p, jumlah=n)
-    prompt = buat_prompt(pp)
+    prompt = buat_prompt(pp, tipe)
     if sudah:
         prompt += ("\n\nSoal yang SUDAH dibuat (jangan diulang; gunakan sub-topik atau konteks berbeda, "
                    f"tetap pada mapel {p['mapel']}):\n- " + "\n- ".join(h["pertanyaan"][:90] for h in sudah))
@@ -664,31 +780,39 @@ def _minta_soal(client, model, p, n, sudah, tegas=False):
         {"role": "user", "content": prompt},
     ]
     data = _ambil_json(_panggil_groq(client, model, pesan))
-    return [normalisasi(s) for s in data.get("soal", [])][:n]
+    return [normalisasi(x, tipe) for x in data.get("soal", [])][:n]
 
 
 def generate_soal_ai(client, p, model=MODEL_DEFAULT):
-    """Membuat soal per batch (maks BATCH_SOAL), memeriksa kesesuaian mapel, lalu menggabungkan."""
-    total = int(p["jumlah"])
+    """Membuat soal per jenis (PG, isian, esai) dan per batch, memeriksa kesesuaian mapel, lalu menggabungkan.
+    p['jumlah_pg'], p['jumlah_isian'], p['jumlah_esai'] = jumlah tiap jenis (p['jumlah'] dianggap PG bila ketiganya kosong)."""
+    komposisi = {"PG": int(p.get("jumlah_pg", p.get("jumlah", 0)) or 0),
+                 "ISIAN": int(p.get("jumlah_isian", 0) or 0),
+                 "ESAI": int(p.get("jumlah_esai", 0) or 0)}
     hasil = []
-    while len(hasil) < total:
-        n = min(BATCH_SOAL, total - len(hasil))
-        baru = _minta_soal(client, model, p, n, hasil)
-        if not baru:
-            raise ValueError("AI tidak menghasilkan soal. Coba lagi atau persingkat materi.")
-        # soal non-Matematika yang tampak seperti hitungan Matematika: minta diganti (maks 2 kali)
-        for _ in range(2):
-            salah = [i for i, x in enumerate(baru) if kemungkinan_salah_mapel(x, p["mapel"])]
-            if not salah:
-                break
-            ganti = _minta_soal(client, model, p, len(salah), hasil + baru, tegas=True)
-            for i, g in zip(salah, ganti):
-                if not kemungkinan_salah_mapel(g, p["mapel"]):
-                    baru[i] = g
-        for x in baru:
-            if kemungkinan_salah_mapel(x, p["mapel"]):
-                x["_salah_mapel"] = True
-        hasil.extend(baru)
+    for tipe in URUT_TIPE:
+        total, selesai = komposisi[tipe], 0
+        while selesai < total:
+            n = min(BATCH_TIPE[tipe], total - selesai)
+            baru = _minta_soal(client, model, p, n, hasil, tipe)
+            if not baru:
+                raise ValueError(f"AI tidak menghasilkan soal {NAMA_TIPE[tipe]}. Coba lagi atau persingkat materi.")
+            # soal non-Matematika yang tampak seperti hitungan Matematika: minta diganti (maks 2 kali)
+            for _ in range(2):
+                salah = [i for i, x in enumerate(baru) if kemungkinan_salah_mapel(x, p["mapel"])]
+                if not salah:
+                    break
+                ganti_ = _minta_soal(client, model, p, len(salah), hasil + baru, tipe, tegas=True)
+                for i, g in zip(salah, ganti_):
+                    if not kemungkinan_salah_mapel(g, p["mapel"]):
+                        baru[i] = g
+            for x in baru:
+                if kemungkinan_salah_mapel(x, p["mapel"]):
+                    x["_salah_mapel"] = True
+            hasil.extend(baru)
+            selesai += len(baru)
+    if not hasil:
+        raise ValueError("Jumlah soal masih 0. Isi jumlah minimal satu jenis soal.")
     return hasil
 
 
@@ -718,6 +842,21 @@ CONTOH_SOAL = [
      "pembahasan": "Total = 5 x Rp36.000 = Rp180.000. Potongan 10% = Rp18.000. Bayar = Rp162.000.",
      "ekspresi_kunci": "5*36000*(1-10/100)",
      "gambar": {"jenis": "pustaka", "objek": ["buku tulis"]}},
+    {"tipe": "ISIAN",
+     "stimulus": "Sebuah taman berbentuk persegi memiliki panjang sisi 12 m.",
+     "pertanyaan": "Keliling taman tersebut adalah ..... m.",
+     "jawaban": "48", "pembahasan": "Keliling persegi = 4 x sisi = 4 x 12 = 48 m.",
+     "ekspresi_kunci": "4*12",
+     "gambar": {"jenis": "persegi", "param": {"sisi": 12, "satuan": "m"}}},
+    {"tipe": "ESAI",
+     "stimulus": "Ani membeli 3 pensil seharga Rp2.500 per buah dan 2 buku tulis seharga Rp6.000 per buah. "
+                 "Ani membayar dengan uang Rp50.000.",
+     "pertanyaan": "Hitunglah uang kembalian Ani! Tuliskan langkah pengerjaannya.",
+     "jawaban": "Harga pensil = 3 x 2.500 = Rp7.500. Harga buku = 2 x 6.000 = Rp12.000. "
+                "Total belanja = Rp19.500. Kembalian = 50.000 - 19.500 = Rp30.500.",
+     "pedoman": "Menghitung harga pensil (1); menghitung harga buku (1); menjumlahkan total belanja (1); "
+                "menghitung kembalian dengan jawaban akhir Rp30.500 (1)",
+     "skor": 4, "ekspresi_kunci": "50000-(3*2500+2*6000)", "gambar": None},
 ]
 
 # =====================================================================
@@ -727,6 +866,16 @@ CONTOH_SOAL = [
 def _esc(t):
     t = str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return re.sub(r"\^(\d+)", r"<super>\1</super>", t)
+
+
+def _baris_kunci(s):
+    """(jenis, kunci/jawaban, pembahasan/pedoman) untuk halaman kunci."""
+    t = s.get("tipe", "PG")
+    if t == "PG":
+        return "PG", s.get("kunci", ""), s.get("pembahasan") or "-"
+    if t == "ISIAN":
+        return "Isian", s.get("jawaban") or "-", s.get("pembahasan") or "-"
+    return "Esai", s.get("jawaban") or "-", f"{s.get('pedoman') or '-'} (Skor maksimal: {s.get('skor', 4)})"
 
 
 def buat_pdf(soal, kop, sertakan_kunci=True, pustaka=None):
@@ -768,13 +917,34 @@ def buat_pdf(soal, kop, sertakan_kunci=True, pustaka=None):
     cerita += [t, Spacer(1, 3), HRFlowable(width="100%", thickness=1.2, color=colors.black), Spacer(1, 10)]
 
     GAMBAR_W, GAMBAR_H = 5.4 * cm, 4.6 * cm
+    st_bagian = ParagraphStyle("bg", parent=base, fontName="Helvetica-Bold", fontSize=11, spaceBefore=4,
+                               keepWithNext=1)
+    st_petunjuk = ParagraphStyle("pt", parent=base, fontName="Helvetica-Oblique", fontSize=9.5, spaceAfter=8,
+                                 keepWithNext=1)
+    jenis_ada = {x.get("tipe", "PG") for x in soal}
+    tipe_lalu, urut_bagian = None, 0
     for no, s in enumerate(soal, 1):
-        kiri = [Paragraph(f"{no}.&nbsp;&nbsp;SOAL {no} - PG".replace("-", "\u2014"), st_judul)]
+        tipe = s.get("tipe", "PG")
+        if len(jenis_ada) > 1 and tipe != tipe_lalu:
+            urut_bagian += 1
+            judul_b, petunjuk = BAGIAN[tipe]
+            cerita += [Paragraph(f"{chr(64 + urut_bagian)}.&nbsp;&nbsp;{judul_b}", st_bagian),
+                       Paragraph(_esc(petunjuk), st_petunjuk)]
+        tipe_lalu = tipe
+        kiri = [Paragraph(f"{no}.&nbsp;&nbsp;SOAL {no} \u2014 {LABEL_TIPE[tipe]}", st_judul)]
         if s["stimulus"]:
             kiri += [Paragraph("Stimulus:", st_label), Paragraph(_esc(s["stimulus"]), base)]
         kiri += [Paragraph("Pertanyaan:", st_label), Paragraph(_esc(s["pertanyaan"]), base), Spacer(1, 2)]
-        for h in "ABCD":
-            kiri.append(Paragraph(f"{h}.&nbsp;&nbsp;&nbsp;{_esc(s['opsi'][h])}", st_opsi))
+        if tipe == "PG":
+            for h in "ABCD":
+                kiri.append(Paragraph(f"{h}.&nbsp;&nbsp;&nbsp;{_esc(s['opsi'][h])}", st_opsi))
+        elif tipe == "ISIAN":
+            kiri.append(Paragraph("Jawaban: " + "." * 38, st_opsi))
+        else:
+            kiri.append(Paragraph(f"<i>(Skor maksimal: {s.get('skor', 4)})</i>", st_opsi))
+            for _ in range(4):
+                kiri.append(HRFlowable(width="100%", thickness=0.6, dash=[1, 2], color=colors.black,
+                                       spaceBefore=12, spaceAfter=0))
         gb = gambar_untuk(s, pustaka)
         if gb:
             im = Image.open(io.BytesIO(gb))
@@ -792,11 +962,13 @@ def buat_pdf(soal, kop, sertakan_kunci=True, pustaka=None):
     if sertakan_kunci:
         cerita.append(PageBreak())
         cerita += [Paragraph("KUNCI JAWABAN DAN PEMBAHASAN", st_kop2), Spacer(1, 8)]
-        baris = [[Paragraph("<b>No</b>", base), Paragraph("<b>Kunci</b>", base), Paragraph("<b>Pembahasan</b>", base)]]
+        baris = [[Paragraph("<b>No</b>", base), Paragraph("<b>Jenis</b>", base),
+                  Paragraph("<b>Kunci / Jawaban</b>", base), Paragraph("<b>Pembahasan / Pedoman Penskoran</b>", base)]]
         for no, s in enumerate(soal, 1):
-            baris.append([Paragraph(str(no), base), Paragraph(s["kunci"], base),
-                          Paragraph(_esc(s["pembahasan"]) or "-", base)])
-        tk = Table(baris, colWidths=[1.2 * cm, 1.6 * cm, LEBAR - 2.8 * cm], repeatRows=1)
+            jenis_k, kunci_k, bahas_k = _baris_kunci(s)
+            baris.append([Paragraph(str(no), base), Paragraph(jenis_k, base),
+                          Paragraph(_esc(kunci_k), base), Paragraph(_esc(bahas_k), base)])
+        tk = Table(baris, colWidths=[1.1 * cm, 1.6 * cm, 5.2 * cm, LEBAR - 7.9 * cm], repeatRows=1)
         tk.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.6, colors.black),
                                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e6e6e6")),
                                 ("VALIGN", (0, 0), (-1, -1), "TOP")]))
@@ -829,6 +1001,11 @@ def _teks_docx(par, teks, bold=False, size=10.5):
         r.font.size = Pt(size)
         if i % 2 == 1:
             r.font.superscript = True
+
+
+def _baris_jawaban(par, lebar_cm):
+    """Baris jawaban berupa titik-titik sepanjang lebar_cm (titik Arial 10,5 pt = sekitar 0,103 cm)."""
+    _teks_docx(par, "." * max(10, int(lebar_cm * 9.0)))
 
 
 def _tanpa_pecah(row):
@@ -902,23 +1079,52 @@ def buat_docx(soal, kop, sertakan_kunci=True, pustaka=None):
     garis(p)
 
     GW = 5.2
+    jenis_ada = {x.get("tipe", "PG") for x in soal}
+    tipe_lalu, urut_bagian = None, 0
     for no, s in enumerate(soal, 1):
+        tipe = s.get("tipe", "PG")
+        if len(jenis_ada) > 1 and tipe != tipe_lalu:
+            urut_bagian += 1
+            judul_b, petunjuk = BAGIAN[tipe]
+            ph = doc.add_paragraph()
+            ph.paragraph_format.keep_with_next = True
+            _teks_docx(ph, f"{chr(64 + urut_bagian)}.  {judul_b}", True, 11)
+            pp_ = doc.add_paragraph()
+            pp_.paragraph_format.keep_with_next = True
+            rr = pp_.add_run(petunjuk)
+            rr.italic = True
+            rr.font.size = Pt(9.5)
+        tipe_lalu = tipe
         gb = gambar_untuk(s, pustaka)
         lebar_kiri = LEBAR - GW - 0.3 if gb else LEBAR
         tb = doc.add_table(rows=1, cols=2 if gb else 1)
         _tanpa_pecah(tb.rows[0])
         kiri = tb.cell(0, 0)
         kiri.width = Cm(lebar_kiri)
-        _teks_docx(kiri.paragraphs[0], f"{no}.  SOAL {no} \u2014 PG", True, 11)
+        _teks_docx(kiri.paragraphs[0], f"{no}.  SOAL {no} \u2014 {LABEL_TIPE[tipe]}", True, 11)
         if s["stimulus"]:
             _teks_docx(kiri.add_paragraph(), "Stimulus:", True)
             _teks_docx(kiri.add_paragraph(), s["stimulus"])
         _teks_docx(kiri.add_paragraph(), "Pertanyaan:", True)
         _teks_docx(kiri.add_paragraph(), s["pertanyaan"])
-        for h in "ABCD":
+        if tipe == "PG":
+            for h in "ABCD":
+                po = kiri.add_paragraph()
+                po.paragraph_format.left_indent = Cm(0.5)
+                _teks_docx(po, f"{h}.   {s['opsi'][h]}")
+        elif tipe == "ISIAN":
             po = kiri.add_paragraph()
             po.paragraph_format.left_indent = Cm(0.5)
-            _teks_docx(po, f"{h}.   {s['opsi'][h]}")
+            _teks_docx(po, "Jawaban: " + "." * 38)
+        else:
+            po = kiri.add_paragraph()
+            ri = po.add_run(f"(Skor maksimal: {s.get('skor', 4)})")
+            ri.italic = True
+            ri.font.size = Pt(9.5)
+            for _ in range(4):
+                pl = kiri.add_paragraph()
+                pl.paragraph_format.space_before = Pt(10)
+                _baris_jawaban(pl, lebar_kiri - 0.5)
         if gb:
             kanan = tb.cell(0, 1)
             kanan.width = Cm(GW + 0.3)
@@ -936,17 +1142,19 @@ def buat_docx(soal, kop, sertakan_kunci=True, pustaka=None):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         _teks_docx(p, "KUNCI JAWABAN DAN PEMBAHASAN", True, 11)
-        tk = doc.add_table(rows=1, cols=3)
+        lk = (1.1, 1.6, 5.2, LEBAR - 7.9)
+        tk = doc.add_table(rows=1, cols=4)
         tk.style = "Table Grid"
-        for c, teks, w in zip(tk.rows[0].cells, ("No", "Kunci", "Pembahasan"), (1.2, 1.6, LEBAR - 2.8)):
+        for c, teks, w in zip(tk.rows[0].cells, ("No", "Jenis", "Kunci / Jawaban", "Pembahasan / Pedoman Penskoran"), lk):
             c.width = Cm(w)
             _teks_docx(c.paragraphs[0], teks, True)
         for no, s in enumerate(soal, 1):
             r = tk.add_row().cells
-            for c, teks, w in zip(r, (str(no), s["kunci"], s["pembahasan"] or "-"), (1.2, 1.6, LEBAR - 2.8)):
+            jenis_k, kunci_k, bahas_k = _baris_kunci(s)
+            for c, teks, w in zip(r, (str(no), jenis_k, kunci_k, bahas_k), lk):
                 c.width = Cm(w)
                 _teks_docx(c.paragraphs[0], teks)
-        _atur_lebar(tk, (1.2, 1.6, LEBAR - 2.8))
+        _atur_lebar(tk, lk)
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -1060,9 +1268,14 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
         mapel = st.text_input("Nama mata pelajaran", key="sj_mapel_lain")
     materi = st.text_area("Materi / Bab (boleh lebih dari satu)", height=80, key="sj_materi",
                           placeholder="Contoh: Kecepatan, jarak, dan waktu; Keliling bangun datar; Perbandingan")
-    c4, c5 = st.columns(2)
-    jumlah = c4.number_input("Jumlah soal", 1, 40, 5, key="sj_jumlah")
-    tingkat = c5.selectbox("Tingkat kesulitan", ["Campuran", "Mudah", "Sedang", "HOTS"], key="sj_tingkat")
+    st.markdown("**Jenis dan jumlah soal**")
+    n1, n2, n3, n4 = st.columns(4)
+    jml_pg = int(n1.number_input("Pilihan ganda", 0, 40, 5, key="sj_jml_pg"))
+    jml_isian = int(n2.number_input("Isian singkat", 0, 20, 0, key="sj_jml_isian"))
+    jml_esai = int(n3.number_input("Esai", 0, 10, 0, key="sj_jml_esai"))
+    tingkat = n4.selectbox("Tingkat kesulitan", ["Campuran", "Mudah", "Sedang", "HOTS"], key="sj_tingkat")
+    total_soal = jml_pg + jml_isian + jml_esai
+    st.caption(f"Total {total_soal} soal: {jml_pg} pilihan ganda, {jml_isian} isian singkat, {jml_esai} esai.")
 
     with st.expander("Kop soal & pengaturan"):
         k1, k2 = st.columns(2)
@@ -1083,7 +1296,9 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
     b1, b2 = st.columns([2, 1])
     if b1.button("\u2728 Generate soal", type="primary", use_container_width=True):
         kunci_api = api_key or _ambil_kunci_groq(st)
-        if not materi.strip():
+        if total_soal < 1:
+            st.warning("Isi jumlah minimal satu jenis soal.")
+        elif not materi.strip():
             st.warning("Isi materi/bab dulu.")
         elif not kunci_api:
             st.error("API Key Groq belum diisi (isi di sidebar).")
@@ -1094,10 +1309,12 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
                     hasil = generate_soal_ai(
                         Groq(api_key=kunci_api),
                         dict(jenis_ujian=jenis, kelas=kelas, mapel=mapel, materi=materi.strip(),
-                             jumlah=int(jumlah), tingkat=tingkat), model=model)
+                             jumlah=total_soal, jumlah_pg=jml_pg, jumlah_isian=jml_isian,
+                             jumlah_esai=jml_esai, tingkat=tingkat), model=model)
                 st.session_state["sg_soal_list"] = hasil
                 st.session_state["sg_soal_uid"] += 1
-                st.session_state["sg_meta"] = {"mapel": mapel, "kelas": str(kelas), "jenis": jenis, "materi": materi.strip()}
+                st.session_state["sg_meta"] = {"mapel": mapel, "kelas": str(kelas), "jenis": jenis, "materi": materi.strip(),
+                                              "rincian": f"{jml_pg} PG, {jml_isian} isian, {jml_esai} esai"}
             except Exception as e:
                 st.error(f"Gagal generate: {e}")
     if b2.button("Contoh Matematika (tanpa AI)", use_container_width=True):
@@ -1116,13 +1333,14 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
                 "Klik Generate soal untuk membuat soal sesuai mapel dan materi.")
     elif meta_gen:
         st.caption(f"Dibuat untuk: {meta_gen['mapel']} \u2022 {meta_gen['kelas']} \u2022 {meta_gen['jenis']} "
-                   f"\u2022 Materi: {meta_gen['materi'][:120]}")
+                   f"\u2022 {meta_gen.get('rincian', '')} \u2022 Materi: {meta_gen['materi'][:100]}")
     st.markdown(f"**{len(soal)} soal** \u2014 periksa dan edit bila perlu.")
 
     for i, s in enumerate(soal):
         k = f"{uid}_{i}"
         ikon = LABEL_STATUS.get(s.get("_status"), "")
-        with st.expander(f"{ikon} Soal {i + 1}", expanded=(s.get("_status") == "gagal")):
+        tipe = s.get("tipe", "PG")
+        with st.expander(f"{ikon} Soal {i + 1} \u2014 {LABEL_TIPE.get(tipe, 'PG')}", expanded=(s.get("_status") == "gagal")):
             if s.get("_status") == "gagal":
                 st.error(s["_catatan"])
             elif s.get("_catatan"):
@@ -1131,12 +1349,20 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
             with kiri:
                 s["stimulus"] = st.text_area("Stimulus", s["stimulus"], key=f"sg_st_{k}", height=110)
                 s["pertanyaan"] = st.text_input("Pertanyaan", s["pertanyaan"], key=f"sg_pt_{k}")
-                for h in "ABCD":
-                    s["opsi"][h] = st.text_input(f"Pilihan {h}", s["opsi"][h], key=f"sg_o{h}_{k}")
-                s["kunci"] = st.selectbox("Kunci jawaban", list("ABCD"),
-                                          index="ABCD".index(s["kunci"]) if s["kunci"] in "ABCD" and s["kunci"] else 0,
-                                          key=f"sg_kc_{k}")
-                s["pembahasan"] = st.text_area("Pembahasan", s["pembahasan"], key=f"sg_pb_{k}", height=80)
+                if tipe == "PG":
+                    for h in "ABCD":
+                        s["opsi"][h] = st.text_input(f"Pilihan {h}", s["opsi"][h], key=f"sg_o{h}_{k}")
+                    s["kunci"] = st.selectbox("Kunci jawaban", list("ABCD"),
+                                              index="ABCD".index(s["kunci"]) if s["kunci"] in "ABCD" and s["kunci"] else 0,
+                                              key=f"sg_kc_{k}")
+                    s["pembahasan"] = st.text_area("Pembahasan", s["pembahasan"], key=f"sg_pb_{k}", height=80)
+                elif tipe == "ISIAN":
+                    s["jawaban"] = st.text_input("Kunci jawaban (isian singkat)", s.get("jawaban", ""), key=f"sg_jw_{k}")
+                    s["pembahasan"] = st.text_area("Pembahasan", s["pembahasan"], key=f"sg_pb_{k}", height=80)
+                else:
+                    s["jawaban"] = st.text_area("Kunci jawaban", s.get("jawaban", ""), key=f"sg_jw_{k}", height=100)
+                    s["pedoman"] = st.text_area("Pedoman penskoran", s.get("pedoman", ""), key=f"sg_pd_{k}", height=80)
+                    s["skor"] = int(st.number_input("Skor maksimal", 1, 20, int(s.get("skor", 4)), key=f"sg_sk_{k}"))
             # ---- gambar stimulus: unggah sendiri / pilih dari pustaka Google Sheet / otomatis ----
             ga, gb2, gc = st.columns([2, 2, 1])
             up = ga.file_uploader("Unggah gambar sendiri", type=["png", "jpg", "jpeg"], key=f"sg_up_{k}")
