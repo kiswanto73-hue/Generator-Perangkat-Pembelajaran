@@ -4771,4 +4771,5 @@ with tab_soal_gambar:
             tahun_ajaran=st.session_state.tahun_ajaran,
             daftar_mapel=SUBJECT_OPTIONS,
             daftar_kelas=KELAS_OPTIONS,
+            model=MODEL_GROQ,
         )
