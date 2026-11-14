@@ -12,12 +12,14 @@ Tahap 1-2: template soal PG bergaya stimulus + ekspor PDF/Word,
 Kebutuhan (requirements.txt): streamlit, groq, matplotlib, pillow, reportlab, python-docx
 """
 import ast
+import base64
 import io
 import json
 import math
 import operator
 import os
 import re
+import uuid
 from pathlib import Path
 
 import matplotlib
@@ -246,24 +248,57 @@ def muat_indeks():
         return []
 
 
-def cari_gambar_pustaka(objek):
-    """Kembalikan daftar bytes gambar (satu per objek yang ketemu, tanpa duplikat)."""
-    indeks = muat_indeks()
+class PustakaSheet:
+    """Pustaka gambar milik guru di Google Sheet (lewat Apps Script).
+    Dibuat per sesi pengguna (bukan variabel global) supaya data antar guru tidak tercampur."""
+
+    def __init__(self, meta=None, ambil=None, versi=0):
+        self.meta = meta if meta is not None else []
+        self.ambil = ambil
+        self.versi = versi
+
+
+def _kata_kunci_list(item):
+    k = item.get("kata_kunci", [])
+    if isinstance(k, str):
+        k = k.split(",")
+    return [str(x).strip().lower() for x in k if str(x).strip()]
+
+
+def _skor(objek, item):
+    kata = _kata_kunci_list(item) + [str(item.get("nama", "")).strip().lower()]
+    return sum(2 if objek == k else 1 for k in kata if k and (objek in k or k in objek))
+
+
+def cari_gambar_pustaka(objek, pustaka=None):
+    """Kembalikan daftar bytes gambar (satu per objek yang ketemu, tanpa duplikat).
+    Gambar milik guru di Google Sheet diprioritaskan, lalu pustaka bawaan di folder pustaka_gambar/."""
+    kandidat = []
+    if pustaka is not None and pustaka.ambil:
+        for item in pustaka.meta:
+            if item.get("id"):
+                kandidat.append(("sheet:" + str(item["id"]), item, lambda it=item: pustaka.ambil(it["id"])))
+    for item in muat_indeks():
+        f = PUSTAKA_DIR / item.get("file", "")
+        if f.is_file():
+            kandidat.append(("file:" + item["file"], item, lambda ff=f: ff.read_bytes()))
     hasil, dipakai = [], set()
     for o in objek or []:
         o = str(o).lower().strip()
+        if not o:
+            continue
         terbaik, skor_max = None, 0
-        for item in indeks:
-            f = PUSTAKA_DIR / item.get("file", "")
-            if not f.is_file():
+        for kunci, item, ambil in kandidat:
+            sk = _skor(o, item)
+            if sk > skor_max:
+                terbaik, skor_max = (kunci, ambil), sk
+        if terbaik and terbaik[0] not in dipakai:
+            try:
+                data = terbaik[1]()
+            except Exception:
                 continue
-            kata = [k.lower() for k in item.get("kata_kunci", [])] + [item.get("nama", "").lower()]
-            skor = sum(2 if o == k else 1 for k in kata if k and (o in k or k in o))
-            if skor > skor_max:
-                terbaik, skor_max = item, skor
-        if terbaik and terbaik["file"] not in dipakai:
-            dipakai.add(terbaik["file"])
-            hasil.append((PUSTAKA_DIR / terbaik["file"]).read_bytes())
+            dipakai.add(terbaik[0])
+            hasil.append(data)
     return hasil
 
 
@@ -286,7 +321,7 @@ def gabung_horizontal(daftar, tinggi=320, jarak=24):
     return out.getvalue()
 
 
-def buat_gambar(spec, upload=None):
+def buat_gambar(spec, upload=None, pustaka=None):
     """Spec gambar -> bytes PNG, atau None bila tidak ada / gagal (soal tetap jalan tanpa gambar)."""
     if upload:
         return upload
@@ -295,7 +330,7 @@ def buat_gambar(spec, upload=None):
     try:
         jenis = spec.get("jenis")
         if jenis == "pustaka":
-            ketemu = cari_gambar_pustaka(spec.get("objek", []))
+            ketemu = cari_gambar_pustaka(spec.get("objek", []), pustaka)
             return gabung_horizontal(ketemu) if ketemu else None
         fungsi = GAMBAR_KODE.get(jenis)
         return fungsi(**(spec.get("param") or {})) if fungsi else None
@@ -303,17 +338,91 @@ def buat_gambar(spec, upload=None):
         return None
 
 
-def gambar_untuk(s):
+def gambar_untuk(s, pustaka=None):
     """Gambar sebuah soal (dengan cache sederhana di dalam dict soal)."""
     if s.get("_hapus_gambar"):
         return None
     if s.get("_upload"):
         return s["_upload"]
-    kunci = json.dumps(s.get("gambar"), sort_keys=True, default=str)
+    kunci = json.dumps(s.get("gambar"), sort_keys=True, default=str) + f"|v{getattr(pustaka, 'versi', 0)}"
     if s.get("_ck") != kunci:
-        s["_cb"] = buat_gambar(s.get("gambar"))
+        s["_cb"] = buat_gambar(s.get("gambar"), pustaka=pustaka)
         s["_ck"] = kunci
     return s.get("_cb")
+
+
+# ---------- Pustaka gambar di Google Sheet (disimpan sebagai teks base64, 1 gambar = beberapa baris) ----------
+UKURAN_BAGIAN = 45000    # 1 sel Google Sheet maksimal 50.000 karakter
+MAKS_KARAKTER = 135000   # maksimal 3 bagian per gambar
+
+
+def kompres_gambar(raw, maks_sisi=800):
+    """Kecilkan gambar (JPEG, latar putih) sampai muat di sel Google Sheet."""
+    im = Image.open(io.BytesIO(raw))
+    if im.mode in ("RGBA", "LA", "P"):
+        im = im.convert("RGBA")
+        latar = Image.new("RGB", im.size, "white")
+        latar.paste(im, mask=im.split()[-1])
+        im = latar
+    else:
+        im = im.convert("RGB")
+    sisi = maks_sisi
+    for _ in range(6):
+        c = im.copy()
+        c.thumbnail((sisi, sisi))
+        for q in (85, 75, 65, 55, 45):
+            buf = io.BytesIO()
+            c.save(buf, "JPEG", quality=q, optimize=True)
+            if len(buf.getvalue()) * 4 // 3 + 4 <= MAKS_KARAKTER:
+                return buf.getvalue()
+        sisi = int(sisi * 0.8)
+    raise ValueError("Gambar terlalu rumit untuk dikompres. Gunakan gambar yang lebih sederhana.")
+
+
+def _pesan_gas(m):
+    m = str(m)
+    if "Aksi tidak dikenal" in m:
+        return ("Apps Script di Google Sheet Anda masih versi lama. Tempel kode terbaru dari panel "
+                "'Panduan Google Sheet', lalu Deploy > Kelola deployment > Versi baru.")
+    return m
+
+
+def sheet_daftar_gambar(gas):
+    ok, j = gas("daftar_gambar")
+    if not ok:
+        raise RuntimeError(_pesan_gas(j))
+    return list(j.get("gambar", []))
+
+
+def sheet_simpan_gambar(gas, nama, kata_kunci, raw):
+    nama = (nama or "").strip()
+    if not nama:
+        raise ValueError("Nama gambar harus diisi.")
+    jpg = kompres_gambar(raw)
+    b64 = base64.b64encode(jpg).decode("ascii")
+    potong = [b64[i:i + UKURAN_BAGIAN] for i in range(0, len(b64), UKURAN_BAGIAN)]
+    gid = "g" + uuid.uuid4().hex[:10]
+    kk = (kata_kunci or "").strip()
+    ok, j = gas("simpan_gambar", {"id": gid, "nama": nama, "kata_kunci": kk, "potong": potong})
+    if not ok:
+        raise RuntimeError(_pesan_gas(j))
+    return {"id": gid, "nama": nama, "kata_kunci": kk}, jpg
+
+
+def sheet_ambil_gambar(gas, gid, cache):
+    if gid in cache:
+        return cache[gid]
+    ok, j = gas("muat_gambar", {"id": gid})
+    if not ok:
+        raise RuntimeError(_pesan_gas(j))
+    cache[gid] = base64.b64decode(j["data"])
+    return cache[gid]
+
+
+def sheet_hapus_gambar(gas, gid):
+    ok, j = gas("hapus_gambar", {"id": gid})
+    if not ok:
+        raise RuntimeError(_pesan_gas(j))
 
 # =====================================================================
 # 3. VERIFIKASI KUNCI JAWABAN
@@ -536,7 +645,7 @@ def _esc(t):
     return re.sub(r"\^(\d+)", r"<super>\1</super>", t)
 
 
-def buat_pdf(soal, kop, sertakan_kunci=True):
+def buat_pdf(soal, kop, sertakan_kunci=True, pustaka=None):
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4
@@ -582,7 +691,7 @@ def buat_pdf(soal, kop, sertakan_kunci=True):
         kiri += [Paragraph("Pertanyaan:", st_label), Paragraph(_esc(s["pertanyaan"]), base), Spacer(1, 2)]
         for h in "ABCD":
             kiri.append(Paragraph(f"{h}.&nbsp;&nbsp;&nbsp;{_esc(s['opsi'][h])}", st_opsi))
-        gb = gambar_untuk(s)
+        gb = gambar_untuk(s, pustaka)
         if gb:
             im = Image.open(io.BytesIO(gb))
             skala = min(GAMBAR_W / im.width, GAMBAR_H / im.height)
@@ -656,7 +765,7 @@ def _atur_lebar(tabel, lebar_cm):
             c.width = Cm(w)
 
 
-def buat_docx(soal, kop, sertakan_kunci=True):
+def buat_docx(soal, kop, sertakan_kunci=True, pustaka=None):
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import OxmlElement
@@ -710,7 +819,7 @@ def buat_docx(soal, kop, sertakan_kunci=True):
 
     GW = 5.2
     for no, s in enumerate(soal, 1):
-        gb = gambar_untuk(s)
+        gb = gambar_untuk(s, pustaka)
         lebar_kiri = LEBAR - GW - 0.3 if gb else LEBAR
         tb = doc.add_table(rows=1, cols=2 if gb else 1)
         _tanpa_pecah(tb.rows[0])
@@ -779,9 +888,14 @@ def _ambil_kunci_groq(st):
     return os.environ.get("GROQ_API_KEY")
 
 
-def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None, daftar_kelas=None, model=None):
-    """api_key/sekolah/tahun_ajaran/daftar_mapel/daftar_kelas boleh diisi dari app induk (app KKG)."""
+def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None, daftar_kelas=None, model=None, gas_kirim=None):
+    """api_key/sekolah/tahun_ajaran/daftar_mapel/daftar_kelas/model/gas_kirim boleh diisi dari app induk (app KKG).
+    gas_kirim(aksi, payload) -> (ok, respons) : fungsi pengirim ke Apps Script milik guru."""
     import streamlit as st
+    ss = st.session_state
+    ss.setdefault("sg_pg_meta", [])
+    ss.setdefault("sg_pg_cache", {})
+    ss.setdefault("sg_pg_versi", 0)
     daftar_mapel = list(daftar_mapel or MAPEL)
     if "Lainnya" not in daftar_mapel:
         daftar_mapel.append("Lainnya")
@@ -790,6 +904,57 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
     st.subheader("\U0001F4DD Generator Soal (UH / PTS / PAS)")
     st.session_state.setdefault("sg_soal_list", [])
     st.session_state.setdefault("sg_soal_uid", 0)
+
+    with st.expander("\U0001F4DA Pustaka gambar saya (Google Sheet)"):
+        if not gas_kirim:
+            st.caption("Fitur ini membutuhkan sambungan Google Sheet dari app KKG (URL Apps Script di sidebar).")
+        else:
+            st.caption("Gambar yang Anda unggah disimpan di Google Sheet milik Anda sendiri dan bisa dipakai sebagai "
+                       "gambar stimulus. Bila kata kuncinya cocok dengan soal, gambar dipilih otomatis.")
+            if st.button("\U0001F504 Muat daftar gambar dari Google Sheet", key="sg_pg_muat"):
+                try:
+                    with st.spinner("Mengambil daftar gambar..."):
+                        ss["sg_pg_meta"][:] = sheet_daftar_gambar(gas_kirim)
+                    ss["sg_pg_versi"] += 1
+                    st.success(f"{len(ss['sg_pg_meta'])} gambar ditemukan.")
+                except Exception as e:
+                    st.error(f"Gagal memuat daftar: {e}")
+            for item in list(ss["sg_pg_meta"]):
+                ca, cb = st.columns([4, 1])
+                ca.markdown(f"**{item.get('nama', '')}**  \n<small>{item.get('kata_kunci', '')}</small>",
+                            unsafe_allow_html=True)
+                if cb.button("\U0001F5D1\uFE0F Hapus", key=f"sg_pg_del_{item['id']}"):
+                    try:
+                        sheet_hapus_gambar(gas_kirim, item["id"])
+                        ss["sg_pg_meta"][:] = [m for m in ss["sg_pg_meta"] if m["id"] != item["id"]]
+                        ss["sg_pg_cache"].pop(item["id"], None)
+                        ss["sg_pg_versi"] += 1
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Gagal menghapus: {e}")
+            st.markdown("**Tambah gambar baru**")
+            f_baru = st.file_uploader("Pilih gambar (PNG/JPG)", type=["png", "jpg", "jpeg", "webp"], key="sg_pg_upl")
+            n_baru = st.text_input("Nama gambar", key="sg_pg_nama", placeholder="Contoh: Bus kota")
+            k_baru = st.text_input("Kata kunci (pisahkan dengan koma)", key="sg_pg_kk",
+                                   placeholder="bus, angkutan, terminal")
+            if st.button("\U0001F4BE Simpan ke Google Sheet", key="sg_pg_simpan"):
+                if f_baru is None:
+                    st.warning("Pilih gambar dulu.")
+                else:
+                    try:
+                        with st.spinner("Mengompres dan menyimpan ke Google Sheet..."):
+                            item, jpg = sheet_simpan_gambar(gas_kirim, n_baru, k_baru, f_baru.getvalue())
+                        ss["sg_pg_cache"][item["id"]] = jpg
+                        ss["sg_pg_meta"].append(item)
+                        ss["sg_pg_versi"] += 1
+                        st.success(f"Gambar '{item['nama']}' tersimpan di Google Sheet.")
+                    except Exception as e:
+                        st.error(f"Gagal menyimpan: {e}")
+    pustaka = None
+    if gas_kirim:
+        pustaka = PustakaSheet(ss["sg_pg_meta"],
+                               lambda gid: sheet_ambil_gambar(gas_kirim, gid, ss["sg_pg_cache"]),
+                               ss["sg_pg_versi"])
 
     c1, c2, c3 = st.columns(3)
     jenis = c1.selectbox("Jenis ujian", JENIS_UJIAN, key="sj_jenis")
@@ -867,16 +1032,55 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
                                           index="ABCD".index(s["kunci"]) if s["kunci"] in "ABCD" and s["kunci"] else 0,
                                           key=f"sg_kc_{k}")
                 s["pembahasan"] = st.text_area("Pembahasan", s["pembahasan"], key=f"sg_pb_{k}", height=80)
+            # ---- gambar stimulus: unggah sendiri / pilih dari pustaka Google Sheet / otomatis ----
+            ga, gb2, gc = st.columns([2, 2, 1])
+            up = ga.file_uploader("Unggah gambar sendiri", type=["png", "jpg", "jpeg"], key=f"sg_up_{k}")
+            if up is not None:
+                s["_upload"] = up.getvalue()
+                s["_sumber"] = "upload"
+                s.pop("_pustaka_id", None)
+            elif s.get("_sumber") == "upload":  # file dikosongkan lagi
+                s.pop("_upload", None)
+                s.pop("_sumber", None)
+            if pustaka is not None and pustaka.meta:
+                nama_map = {m["id"]: m.get("nama", m["id"]) for m in pustaka.meta}
+                pilih = gb2.selectbox("Atau pilih dari pustaka Google Sheet", ["-"] + list(nama_map),
+                                      format_func=lambda x: "(otomatis)" if x == "-" else nama_map.get(x, x),
+                                      key=f"sg_pl_{k}")
+                if s.get("_sumber") != "upload":
+                    if pilih != "-":
+                        if s.get("_pustaka_id") != pilih:
+                            try:
+                                s["_upload"] = pustaka.ambil(pilih)
+                                s["_sumber"] = "pustaka"
+                                s["_pustaka_id"] = pilih
+                            except Exception as e:
+                                st.error(f"Gagal mengambil gambar: {e}")
+                    elif s.get("_sumber") == "pustaka":
+                        for kk_ in ("_upload", "_sumber", "_pustaka_id"):
+                            s.pop(kk_, None)
+            s["_hapus_gambar"] = gc.checkbox("Tanpa gambar", s.get("_hapus_gambar", False), key=f"sg_hg_{k}")
+            if up is not None and pustaka is not None:
+                st.markdown("**\U0001F4BE Simpan gambar ini ke pustaka Google Sheet**")
+                sa, sb2, sc = st.columns([2, 2, 1])
+                nm = sa.text_input("Nama gambar", key=f"sg_nm_{k}")
+                kw = sb2.text_input("Kata kunci (pisahkan koma)", key=f"sg_kw_{k}")
+                if sc.button("Simpan", key=f"sg_sv_{k}"):
+                    try:
+                        with st.spinner("Menyimpan ke Google Sheet..."):
+                            item, jpg = sheet_simpan_gambar(gas_kirim, nm, kw, up.getvalue())
+                        ss["sg_pg_cache"][item["id"]] = jpg
+                        ss["sg_pg_meta"].append(item)
+                        ss["sg_pg_versi"] += 1
+                        st.success(f"Tersimpan sebagai '{item['nama']}'.")
+                    except Exception as e:
+                        st.error(f"Gagal menyimpan: {e}")
             with kanan:
-                gb = gambar_untuk(s)
+                gb = gambar_untuk(s, pustaka)
                 if gb:
                     st.image(gb, use_container_width=True)
                 else:
                     st.caption("Tanpa gambar")
-                up = st.file_uploader("Ganti gambar", type=["png", "jpg", "jpeg"], key=f"sg_up_{k}")
-                if up is not None:
-                    s["_upload"] = up.getvalue()
-                s["_hapus_gambar"] = st.checkbox("Tanpa gambar", s.get("_hapus_gambar", False), key=f"sg_hg_{k}")
             # kunci diedit manual -> kunci dianggap pilihan guru; status dihitung ulang kecuali yang diperbaiki
             verifikasi(s, perbaiki=False)
 
@@ -887,9 +1091,9 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
     d1, d2 = st.columns(2)
     nama = re.sub(r"[^A-Za-z0-9_-]+", "_", f"soal_{mapel}_{kelas}")
     try:
-        d1.download_button("\u2B07\uFE0F Unduh PDF", buat_pdf(soal, kop, sertakan), f"{nama}.pdf",
+        d1.download_button("\u2B07\uFE0F Unduh PDF", buat_pdf(soal, kop, sertakan, pustaka), f"{nama}.pdf",
                            "application/pdf", use_container_width=True)
-        d2.download_button("\u2B07\uFE0F Unduh Word (.docx)", buat_docx(soal, kop, sertakan), f"{nama}.docx",
+        d2.download_button("\u2B07\uFE0F Unduh Word (.docx)", buat_docx(soal, kop, sertakan, pustaka), f"{nama}.docx",
                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                            use_container_width=True)
     except Exception as e:
