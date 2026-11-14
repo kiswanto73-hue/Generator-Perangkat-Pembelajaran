@@ -495,6 +495,7 @@ GAS_KODE_APPS_SCRIPT = r'''// Apps Script untuk Generator Perangkat Ajar KKG
 
 var KOLOM_JURNAL = ["Tanggal", "Kelas", "Mapel", "JP", "Materi", "Kegiatan", "Hadir", "Catatan"];
 var KOLOM_JP = ["Kunci", "Mapel", "Kelas", "Tahun Ajaran", "JP per Tahun", "Diperbarui"];
+var KOLOM_GAMBAR = ["ID", "Nama", "Kata Kunci", "Bagian", "Total Bagian", "Data", "Diperbarui"];
 
 function _sheet(nama, header) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -521,6 +522,15 @@ function _kunciJurnal(a) {
   var bagian = [];
   for (var i = 0; i < 5; i++) bagian.push(_teks(a[i]).trim());
   return bagian.join("|");
+}
+
+function _hapusGambar(sh, id) {
+  var data = sh.getDataRange().getValues();
+  var n = 0;
+  for (var i = data.length - 1; i >= 1; i--) {
+    if (String(data[i][0]) === String(id)) { sh.deleteRow(i + 1); n++; }
+  }
+  return n;
 }
 
 function doGet(e) {
@@ -599,6 +609,54 @@ function doPost(e) {
         }
       }
       return _json({ ok: true, jp_tahun: null });
+    }
+
+    // ---- Pustaka gambar soal: 1 gambar = beberapa baris teks base64 (batas 1 sel = 50.000 karakter) ----
+    if (aksi === "simpan_gambar") {
+      var sg = _sheet("Pustaka_Gambar", KOLOM_GAMBAR);
+      _hapusGambar(sg, d.id);
+      var potong = d.potong || [];
+      var barisG = [];
+      for (var g = 0; g < potong.length; g++) {
+        barisG.push([d.id, d.nama, d.kata_kunci, g + 1, potong.length, potong[g], new Date()]);
+      }
+      if (barisG.length > 0) {
+        var rg = sg.getRange(sg.getLastRow() + 1, 1, barisG.length, KOLOM_GAMBAR.length);
+        rg.setNumberFormat("@");
+        rg.setValues(barisG);
+      }
+      return _json({ ok: true, id: d.id, bagian: barisG.length });
+    }
+
+    if (aksi === "daftar_gambar") {
+      var sd = _sheet("Pustaka_Gambar", KOLOM_GAMBAR);
+      var dataD = sd.getDataRange().getValues();
+      var daftar = [];
+      for (var q = 1; q < dataD.length; q++) {
+        if (String(dataD[q][3]) === "1") {
+          daftar.push({ id: _teks(dataD[q][0]), nama: _teks(dataD[q][1]), kata_kunci: _teks(dataD[q][2]) });
+        }
+      }
+      return _json({ ok: true, gambar: daftar });
+    }
+
+    if (aksi === "muat_gambar") {
+      var sx = _sheet("Pustaka_Gambar", KOLOM_GAMBAR);
+      var dataX = sx.getDataRange().getValues();
+      var bagian = [];
+      for (var u = 1; u < dataX.length; u++) {
+        if (String(dataX[u][0]) === String(d.id)) bagian.push([Number(dataX[u][3]), String(dataX[u][5])]);
+      }
+      if (bagian.length === 0) return _json({ ok: false, pesan: "Gambar tidak ditemukan di Sheet." });
+      bagian.sort(function (a, b) { return a[0] - b[0]; });
+      var gabung = "";
+      for (var w = 0; w < bagian.length; w++) gabung += bagian[w][1];
+      return _json({ ok: true, data: gabung });
+    }
+
+    if (aksi === "hapus_gambar") {
+      var sh2 = _sheet("Pustaka_Gambar", KOLOM_GAMBAR);
+      return _json({ ok: true, dihapus: _hapusGambar(sh2, d.id) });
     }
 
     return _json({ ok: false, pesan: "Aksi tidak dikenal: " + aksi });
@@ -4772,4 +4830,5 @@ with tab_soal_gambar:
             daftar_mapel=SUBJECT_OPTIONS,
             daftar_kelas=KELAS_OPTIONS,
             model=MODEL_GROQ,
+            gas_kirim=gas_kirim,
         )
