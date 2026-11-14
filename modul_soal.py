@@ -518,31 +518,92 @@ def normalisasi(s):
 # 4. GENERATE SOAL DENGAN AI (Groq)
 # =====================================================================
 
+def _mapel_matematika(mapel):
+    return "matematika" in str(mapel).lower()
+
+
+PETUNJUK_MAPEL = [
+    ("ipas", "Soal IPAS menguji PEMAHAMAN KONSEP: fenomena alam/sosial, sebab-akibat, ciri dan klasifikasi, "
+             "pengamatan/percobaan sederhana, kegiatan manusia dan lingkungan. Stimulus berupa teks pengamatan, "
+             "cerita fenomena, atau tabel/data singkat. BUKAN soal hitungan."),
+    ("indonesia", "Soal Bahasa Indonesia berbasis teks bacaan/stimulus pendek: ide pokok, isi teks, kosakata, "
+                  "ejaan dan tanda baca, jenis kalimat/paragraf. BUKAN soal hitungan."),
+    ("inggris", "Soal Bahasa Inggris sesuai level SD: vocabulary, short text/dialogue, simple grammar. "
+                "BUKAN soal hitungan."),
+    ("agama", "Soal sesuai materi agama: pemahaman nilai, kisah, tata cara ibadah, akhlak. BUKAN soal hitungan."),
+    ("pancasila", "Soal Pendidikan Pancasila: nilai Pancasila, norma, hak dan kewajiban, kasus sederhana "
+                  "kehidupan sehari-hari. BUKAN soal hitungan."),
+]
+
+
+def _petunjuk_mapel(mapel):
+    m = str(mapel).lower()
+    for kunci, teks in PETUNJUK_MAPEL:
+        if kunci in m:
+            return teks
+    return "Soal harus murni materi mata pelajaran ini dan BUKAN soal hitungan Matematika."
+
+
 def buat_prompt(p):
-    return (
+    mat = _mapel_matematika(p["mapel"])
+    kepala = (
         "Buatkan soal pilihan ganda untuk siswa SD sesuai Kurikulum Merdeka.\n"
         f"- Jenis ujian : {p['jenis_ujian']}\n- Kelas       : {p['kelas']}\n"
         f"- Mapel       : {p['mapel']}\n- Materi/Bab  : {p['materi']}\n"
         f"- Jumlah soal : {p['jumlah']}\n- Tingkat     : {p['tingkat']}\n\n"
         f"WAJIB: SEMUA soal harus membahas mata pelajaran {p['mapel']} untuk {p['kelas']} dengan materi: "
-        f"{p['materi']}. DILARANG membuat soal mata pelajaran lain (misalnya soal hitungan Matematika untuk "
-        "mapel non-Matematika) kecuali materi tersebut memang memuat hitungan.\n\n"
-        "ATURAN:\n"
-        "1. Bahasa Indonesia baku, panjang kalimat sesuai kelas (kelas 1-2: kalimat pendek dan sederhana).\n"
-        "2. 'stimulus' = cerita/data singkat yang memuat SEMUA angka dan satuan yang dibutuhkan. "
-        "'pertanyaan' = satu kalimat tanya.\n"
-        "3. Empat pilihan A-D, hanya satu benar. Pengecoh berupa kesalahan umum siswa. Tulis angka gaya Indonesia "
-        "(titik ribuan, koma desimal), pilihan angka diurutkan naik, panjang pilihan seimbang.\n"
-        "4. 'ekspresi_kunci': untuk soal hitungan, tulis ekspresi Python (hanya angka dengan TITIK desimal, "
-        "operator + - * / dan kurung) yang hasilnya sama dengan nilai pilihan yang benar, dalam satuan yang sama "
-        "dengan pilihan tersebut. Untuk soal bukan hitungan (termasuk hampir semua soal IPAS, bahasa, agama) isi null.\n"
-        "5. 'pembahasan' = langkah penyelesaian singkat.\n"
-        "6. Gambar dari kode (bangun datar, diagram, jam, dst.) HANYA dipakai bila materinya memang membutuhkannya; "
-        "untuk mapel lain pakai \"pustaka\" bila perlu, atau null. " + GAMBAR_DOKUMEN + "\n\n"
-        "Balas HANYA JSON valid dengan bentuk:\n"
-        '{"soal":[{"stimulus":"...","pertanyaan":"...","opsi":{"A":"...","B":"...","C":"...","D":"..."},'
-        '"kunci":"B","pembahasan":"...","ekspresi_kunci":null,"gambar":null}]}'
+        f"{p['materi']}. DILARANG membuat soal mata pelajaran lain"
+        + ("" if mat else " (terutama soal hitungan Matematika seperti harga, keliling, luas, kecepatan)")
+        + ".\n"
     )
+    if not mat:
+        kepala += "Panduan mapel: " + _petunjuk_mapel(p["mapel"]) + "\n"
+    if mat:
+        aturan = (
+            "1. Bahasa Indonesia baku, panjang kalimat sesuai kelas (kelas 1-2: kalimat pendek dan sederhana).\n"
+            "2. 'stimulus' = cerita/data singkat yang memuat SEMUA angka dan satuan yang dibutuhkan. "
+            "'pertanyaan' = satu kalimat tanya.\n"
+            "3. Empat pilihan A-D, hanya satu benar. Pengecoh berupa kesalahan umum siswa. Tulis angka gaya Indonesia "
+            "(titik ribuan, koma desimal), pilihan angka diurutkan naik, panjang pilihan seimbang.\n"
+            "4. 'ekspresi_kunci': untuk soal hitungan, tulis ekspresi Python (hanya angka dengan TITIK desimal, "
+            "operator + - * / dan kurung) yang hasilnya sama dengan nilai pilihan yang benar, dalam satuan yang sama "
+            "dengan pilihan tersebut. Untuk soal bukan hitungan isi null.\n"
+            "5. 'pembahasan' = langkah penyelesaian singkat.\n"
+            "6. Gambar dari kode (bangun datar, diagram, jam, dst.) HANYA dipakai bila materinya memang membutuhkannya. "
+            + GAMBAR_DOKUMEN + "\n\n"
+        )
+    else:
+        aturan = (
+            "1. Bahasa Indonesia baku, panjang kalimat sesuai kelas (kelas 1-2: kalimat pendek dan sederhana).\n"
+            "2. 'stimulus' = teks/pengamatan/data singkat yang memuat informasi yang dibutuhkan untuk menjawab. "
+            "'pertanyaan' = satu kalimat tanya.\n"
+            "3. Empat pilihan A-D, hanya satu benar. Pengecoh berupa miskonsepsi yang masuk akal, panjang pilihan seimbang.\n"
+            "4. 'ekspresi_kunci' WAJIB null (ini bukan soal hitungan).\n"
+            "5. 'pembahasan' = alasan jawaban benar, singkat.\n"
+            "6. Gambar: pakai {\"jenis\":\"pustaka\",\"objek\":[...]} untuk benda/hewan/tumbuhan/tempat bila membantu, "
+            "{\"jenis\":\"diagram_batang\",...} bila ada data tabel/grafik, selain itu null. Jangan memaksakan gambar. "
+            "Jangan menulis teks apa pun di dalam gambar.\n\n"
+        )
+    return (kepala + "\nATURAN:\n" + aturan +
+            "Balas HANYA JSON valid dengan bentuk:\n"
+            '{"soal":[{"stimulus":"...","pertanyaan":"...","opsi":{"A":"...","B":"...","C":"...","D":"..."},'
+            '"kunci":"B","pembahasan":"...","ekspresi_kunci":null,"gambar":null}]}')
+
+
+_RE_HITUNG = re.compile(r"keliling|luas (persegi|segitiga|lingkaran|trapesium|bangun|tanah|lahan)|kecepatan rata|"
+                        r"kembalian|diskon|potongan harga|berapa total|berapa biaya|berapa harga", re.I)
+_RE_OPSI_ANGKA = re.compile(r"^\s*(rp\s*)?[\d\.,]+\s*[a-z/%\u00b2\u00b3 ]{0,12}$", re.I)
+
+
+def kemungkinan_salah_mapel(s, mapel):
+    """True bila soal non-Matematika tampak seperti soal hitungan Matematika."""
+    if _mapel_matematika(mapel):
+        return False
+    if s.get("ekspresi_kunci"):
+        return True
+    semua_angka = all(_RE_OPSI_ANGKA.match(str(v)) for v in s.get("opsi", {}).values())
+    teks = f"{s.get('stimulus', '')} {s.get('pertanyaan', '')}"
+    return bool(semua_angka and _RE_HITUNG.search(teks))
 
 
 def _ambil_json(teks):
@@ -588,26 +649,45 @@ def _panggil_groq(client, model, pesan, max_token=5000):
     raise RuntimeError(f"Groq menolak permintaan berulang kali. Detail: {err}")
 
 
+def _minta_soal(client, model, p, n, sudah, tegas=False):
+    pp = dict(p, jumlah=n)
+    prompt = buat_prompt(pp)
+    if sudah:
+        prompt += ("\n\nSoal yang SUDAH dibuat (jangan diulang; gunakan sub-topik atau konteks berbeda, "
+                   f"tetap pada mapel {p['mapel']}):\n- " + "\n- ".join(h["pertanyaan"][:90] for h in sudah))
+    if tegas:
+        prompt += (f"\n\nPERHATIAN: percobaan sebelumnya salah mapel (berupa soal hitungan Matematika). "
+                   f"Kali ini SEMUA soal harus murni {p['mapel']}, materi: {p['materi']}. ekspresi_kunci harus null.")
+    pesan = [
+        {"role": "system", "content": "Kamu guru SD berpengalaman dan penyusun soal asesmen. "
+                                      "Keluarkan hanya JSON valid, tanpa teks lain."},
+        {"role": "user", "content": prompt},
+    ]
+    data = _ambil_json(_panggil_groq(client, model, pesan))
+    return [normalisasi(s) for s in data.get("soal", [])][:n]
+
+
 def generate_soal_ai(client, p, model=MODEL_DEFAULT):
-    """Membuat soal per batch (maks BATCH_SOAL) lalu menggabungkan dan memverifikasi."""
+    """Membuat soal per batch (maks BATCH_SOAL), memeriksa kesesuaian mapel, lalu menggabungkan."""
     total = int(p["jumlah"])
     hasil = []
     while len(hasil) < total:
         n = min(BATCH_SOAL, total - len(hasil))
-        pp = dict(p, jumlah=n)
-        prompt = buat_prompt(pp)
-        if hasil:
-            prompt += ("\n\nSoal yang SUDAH dibuat (jangan diulang, gunakan konteks dan angka berbeda):\n- "
-                       + "\n- ".join(h["pertanyaan"][:90] for h in hasil))
-        pesan = [
-            {"role": "system", "content": "Kamu guru SD berpengalaman dan penyusun soal asesmen. "
-                                          "Keluarkan hanya JSON valid, tanpa teks lain."},
-            {"role": "user", "content": prompt},
-        ]
-        data = _ambil_json(_panggil_groq(client, model, pesan))
-        baru = [normalisasi(s) for s in data.get("soal", [])][:n]
+        baru = _minta_soal(client, model, p, n, hasil)
         if not baru:
             raise ValueError("AI tidak menghasilkan soal. Coba lagi atau persingkat materi.")
+        # soal non-Matematika yang tampak seperti hitungan Matematika: minta diganti (maks 2 kali)
+        for _ in range(2):
+            salah = [i for i, x in enumerate(baru) if kemungkinan_salah_mapel(x, p["mapel"])]
+            if not salah:
+                break
+            ganti = _minta_soal(client, model, p, len(salah), hasil + baru, tegas=True)
+            for i, g in zip(salah, ganti):
+                if not kemungkinan_salah_mapel(g, p["mapel"]):
+                    baru[i] = g
+        for x in baru:
+            if kemungkinan_salah_mapel(x, p["mapel"]):
+                x["_salah_mapel"] = True
         hasil.extend(baru)
     return hasil
 
@@ -1108,6 +1188,10 @@ def render_tab_soal(api_key=None, sekolah="", tahun_ajaran="", daftar_mapel=None
                     st.caption("Tanpa gambar")
             # kunci diedit manual -> kunci dianggap pilihan guru; status dihitung ulang kecuali yang diperbaiki
             verifikasi(s, perbaiki=False)
+            if s.get("_salah_mapel") and not _mapel_matematika(mapel):
+                s["_status"] = "gagal"
+                s["_catatan"] = (f"Soal ini tampak seperti soal hitungan Matematika, bukan {mapel}. "
+                                 "Edit soalnya atau buang dengan menggenerate ulang.")
 
     st.divider()
     kop = dict(sekolah=sekolah, jenis_ujian=jenis, tahun_ajaran=tahun_ajaran, mapel=mapel,
